@@ -15,6 +15,7 @@
 #include "platform/memory_sanitizer.h"
 #include "platform/thread_sanitizer.h"
 #include "platform/unicode.h"
+#include "vm/snapshot.h"
 #include "vm/app_snapshot.h"
 #include "vm/bytecode_reader.h"
 #include "vm/class_finalizer.h"
@@ -1889,6 +1890,34 @@ Dart_CreateSnapshot(uint8_t** vm_snapshot_data_buffer,
   return Api::Success();
 #endif
 }
+
+// --- Shorebird code-push support -----------------------------------------
+// Sizes of the raw snapshot blobs, taken from the headers the VM wrote. The
+// engine treats vm_data/iso_data/vm_instructions/iso_instructions as one
+// contiguous stream when applying a patch, so it needs each length while
+// holding only a non-owned pointer to the mapping.
+DART_EXPORT intptr_t Dart_SnapshotDataSize(const uint8_t* snapshot_data) {
+  if (snapshot_data == nullptr) {
+    return 0;
+  }
+  const Snapshot* snapshot = Snapshot::SetupFromBuffer(snapshot_data);
+  if (snapshot == nullptr) {
+    return 0;
+  }
+  return snapshot->length();
+}
+
+DART_EXPORT intptr_t Dart_SnapshotInstrSize(
+    const uint8_t* snapshot_instructions) {
+  if (snapshot_instructions == nullptr) {
+    return 0;
+  }
+  // snapshot_size() is the whole image including its header, which is what the
+  // engine maps. (Image::kHeaderSize itself is private.)
+  const Image image(snapshot_instructions);
+  return static_cast<intptr_t>(image.snapshot_size());
+}
+// --- end Shorebird code-push support -------------------------------------
 
 DART_EXPORT bool Dart_IsKernel(const uint8_t* buffer, intptr_t buffer_size) {
   if (buffer_size < 4) {

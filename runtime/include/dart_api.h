@@ -1452,6 +1452,29 @@ Dart_CreateSnapshot(uint8_t** vm_snapshot_data_buffer,
 DART_EXPORT bool Dart_IsKernel(const uint8_t* buffer, intptr_t buffer_size);
 
 /**
+ * Returns the size in bytes of a snapshot DATA blob, read from the snapshot
+ * header the VM itself wrote.
+ *
+ * Added for Shorebird-style code push: the engine maps the vm/isolate data and
+ * instructions blobs as one contiguous byte stream for the updater to patch
+ * against, and needs each blob's length without owning the mapping.
+ *
+ * Returns 0 if \p snapshot_data is NULL or does not carry a valid snapshot
+ * header.
+ */
+DART_EXPORT intptr_t Dart_SnapshotDataSize(const uint8_t* snapshot_data);
+
+/**
+ * Returns the size in bytes of a snapshot INSTRUCTIONS image, including its
+ * header, read from the image header the VM itself wrote.
+ *
+ * Companion to Dart_SnapshotDataSize; see that comment.
+ *
+ * Returns 0 if \p snapshot_instructions is NULL.
+ */
+DART_EXPORT intptr_t Dart_SnapshotInstrSize(const uint8_t* snapshot_instructions);
+
+/**
  * Returns whether the buffer contains a bytecode file.
  *
  * \param buffer Pointer to a buffer that might contain a bytecode binary.

@@ -56,6 +56,11 @@ class Image : ValueObject {
 
   uword object_size() const { return snapshot_size_ - kHeaderSize; }
 
+  // Full size of the image including its header. kHeaderSize is private, so
+  // embedders cannot reconstruct this from object_size(); Dart_SnapshotInstrSize
+  // needs it to size the instructions blob for code push.
+  uword snapshot_size() const { return snapshot_size_; }
+
   bool contains(uword address) const {
     uword start = reinterpret_cast<uword>(object_start());
     return address >= start && (address - start < object_size());
