@@ -62,6 +62,24 @@ DEFINE_FLAG(bool,
             force_indirect_calls,
             false,
             "Do not emit PC relative calls.");
+// Route B (selfhost). AOT resolves a static call to its callee at compile time,
+// either as a PC-relative branch or as a pool slot the binder patches to hold
+// the callee's Code. Both bake the target, so Function::AttachBytecode -- which
+// repoints Function.code_ and Function.entry_point_ -- cannot redirect them.
+// That is precisely what the kill gate observed: IsInterpreted flipped to 1 and
+// every Dart call shape still ran the old body.
+//
+// Under this flag a static call instead loads the callee's Function and
+// branches through Function.entry_point_. Normally that field IS the AOT
+// implementation, so nothing changes except the call sequence; after
+// AttachBytecode it is the InterpretCall stub, and existing callers start
+// running patched Dart. See selfhost/ROUTE_B.md.
+DEFINE_FLAG(bool,
+            patchable_static_calls,
+            false,
+            "AOT/arm64: dispatch static Dart calls through the callee's "
+            "Function so AttachBytecode can redirect them (Route B). "
+            "Requires a build with dart_dynamic_modules=true.");
 
 DECLARE_FLAG(charp, deoptimize_filter);
 DECLARE_FLAG(bool, intrinsify);

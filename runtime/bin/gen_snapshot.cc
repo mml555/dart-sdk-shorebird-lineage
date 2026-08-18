@@ -115,6 +115,7 @@ static const char* const kSnapshotKindNames[] = {
   V(loading_unit_manifest, loading_unit_manifest_filename)                     \
   V(save_debugging_info, debugging_info_filename)                              \
   V(save_obfuscation_map, obfuscation_map_filename)                            \
+  V(load_obfuscation_map, load_obfuscation_map_filename)                       \
   V(ffi_callback_stub, ffi_callback_stub_filename)
 
 #define BOOL_OPTIONS_LIST(V)                                                   \
@@ -172,6 +173,7 @@ static void PrintUsage() {
 "[--obfuscate]                                                               \n"
 "[--save-debugging-info=<debug-filename>]                                    \n"
 "[--save-obfuscation-map=<map-filename>]                                     \n"
+"[--load-obfuscation-map=<map-filename>]                                     \n"
 "<dart-kernel-file>                                                          \n"
 "                                                                            \n"
 "To create an AOT application snapshot as an ELF shared library:             \n"
@@ -181,6 +183,7 @@ static void PrintUsage() {
 "[--obfuscate]                                                               \n"
 "[--save-debugging-info=<debug-filename>]                                    \n"
 "[--save-obfuscation-map=<map-filename>]                                     \n"
+"[--load-obfuscation-map=<map-filename>]                                     \n"
 "<dart-kernel-file>                                                          \n"
 "                                                                            \n"
 "To create an AOT application snapshot as an Mach-O dynamic library (dylib): \n"
@@ -190,6 +193,7 @@ static void PrintUsage() {
 "[--obfuscate]                                                               \n"
 "[--save-debugging-info=<debug-filename>]                                    \n"
 "[--save-obfuscation-map=<map-filename>]                                     \n"
+"[--load-obfuscation-map=<map-filename>]                                     \n"
 "<dart-kernel-file>                                                          \n"
 "                                                                            \n"
 "To create an AOT application snapshot as a PE/COFF object:                  \n"
@@ -198,13 +202,16 @@ static void PrintUsage() {
 "[--strip]                                                                   \n"
 "[--obfuscate]                                                               \n"
 "[--save-obfuscation-map=<map-filename>]                                     \n"
+"[--load-obfuscation-map=<map-filename>]                                     \n"
 "<dart-kernel-file>                                                          \n"
 "                                                                            \n"
 "AOT snapshots can be obfuscated: that is all identifiers will be renamed    \n"
 "during compilation. This mode is enabled with --obfuscate flag. Mapping     \n"
 "between original and obfuscated names can be serialized as a JSON array     \n"
-"using --save-obfuscation-map=<filename> option. See dartbug.com/30524       \n"
-"for implementation details and limitations of the obfuscation pass.         \n"
+"using --save-obfuscation-map=<filename> option. A previously saved map can  \n"
+"be loaded using --load-obfuscation-map=<filename> to ensure consistent      \n"
+"obfuscation across separate compilations. See dartbug.com/30524 for         \n"
+"implementation details and limitations of the obfuscation pass.             \n"
 "                                                                            \n"
 "\n");
   if (verbose) {
@@ -352,6 +359,34 @@ static int ParseArguments(int argc,
         "--save-obfuscation_map=<...> should only be specified when "
         "obfuscation is enabled by the --obfuscate flag.\n\n");
     return -1;
+  }
+
+  // SELFHOST: mirror of the check above. The wording (and the correctly
+  // hyphenated flag name, where save's neighbour above has a long-standing
+  // "-obfuscation_map=" typo) is reproduced verbatim from the Shorebird fork
+  // binary's string table — see 0008's header for the derivation.
+  if (!obfuscate && load_obfuscation_map_filename != nullptr) {
+    Syslog::PrintErr(
+        "--load-obfuscation-map=<...> should only be specified when "
+        "obfuscation is enabled by the --obfuscate flag.\n\n");
+    return -1;
+  }
+
+  // SELFHOST: hand the path to the VM instead of reading it here.
+  //
+  // This is NOT a stylistic choice. The obfuscation state is seeded during
+  // isolate bootstrap: measured under lldb, the first Obfuscator is built at
+  //   Obfuscator::Obfuscator -> BootstrapFromKernelSingleProgram
+  //     -> Object::Init -> CreateIsolate -> Dart_CreateIsolateGroupFromKernel
+  //     -> dart::bin::main
+  // i.e. INSIDE Dart_CreateIsolateGroupFromKernel, before this embedder ever
+  // regains control and long before Dart_Precompile. Any embedder-side API
+  // call could therefore only merge into a live, already-renaming map — which
+  // would accept the flag and then rename INCONSISTENTLY, the one outcome
+  // worse than not supporting it at all.
+  if (load_obfuscation_map_filename != nullptr) {
+    vm_options->AddArgument(Utils::SCreate("--load_obfuscation_map=%s",
+                                           load_obfuscation_map_filename));
   }
 
   if (!IsSnapshottingForPrecompilation()) {
