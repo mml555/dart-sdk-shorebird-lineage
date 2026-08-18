@@ -1146,6 +1146,39 @@ bool isToStringVisiting(Object object) {
 /// Returns a future containing the result of the entry point method.
 external Future<Object?> loadDynamicModule({Uri? uri, Uint8List? bytes});
 
+/// Replaces the body of an already-compiled [targetName] in [libraryUri] with
+/// the function contained in [bytecode], which is then run interpreted.
+///
+/// Added for the self-hosted iOS code-push kill gate: unlike
+/// [loadDynamicModule], which runs a module's own entry point, this REPLACES an
+/// existing function. Returns false if the target or bytecode cannot be
+/// resolved, so a harness error stays distinguishable from a VM refusal.
+external bool attachBytecodeToFunction(
+  Uint8List bytecode,
+  String libraryUri,
+  String targetName,
+);
+
+/// Undoes [attachBytecodeToFunction] for [targetName] in [libraryUri],
+/// restoring the AOT body the release shipped with.
+///
+/// Route B step 4 needs this to be a real operation rather than a reinstall:
+/// activation has to be reversible for the same reason Shorebird's existing
+/// patch lifecycle is -- a patch that boots badly must be reversible without
+/// a store round trip. Returns false when the target is not currently
+/// interpreted, so "nothing to revert" stays distinguishable from a failure.
+external bool detachBytecodeFromFunction(String libraryUri, String targetName);
+
+/// The GNU build ID of the running AOT snapshot, lowercase hex, or null when
+/// the snapshot carries none.
+///
+/// This is Route B's release identity. Patch bytecode is compiled against one
+/// specific release's kernel, so applying it to a different build is undefined
+/// rather than merely unsupported; the build ID is emitted by the toolchain and
+/// readable at run time, which lets the check happen before anything is
+/// attached instead of as a crash afterwards.
+external String? releaseBuildId();
+
 /// Helper class to create `bool Function(Object?)` functions which
 /// perform an `v is T` type test.
 ///
