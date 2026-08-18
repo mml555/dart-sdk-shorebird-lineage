@@ -8430,6 +8430,19 @@ void Function::ClearBytecode() const {
   ClearCode();
 }
 
+void Function::RestoreCodeFromBytecode(const Code& original) const {
+  ASSERT(IsolateGroup::Current()->program_lock()->IsCurrentThreadWriter());
+  ASSERT(HasBytecode());
+  ASSERT(!original.IsNull());
+  untag()->set_ic_data_array_or_bytecode(Object::null());
+  // SetInstructions, not AttachCode: AttachCode asserts the Code's function
+  // back-pointer, and an AOT Code object's function() is already this function
+  // -- but going through SetInstructions keeps this a pure restore of code_,
+  // entry_point_ and unchecked_entry_point_, which is exactly what
+  // AttachBytecode overwrote and nothing more.
+  SetInstructions(original);
+}
+
 bool Function::IsInterpreted(FunctionPtr function) {
   return function->untag()->code() == StubCode::InterpretCall().ptr();
 }

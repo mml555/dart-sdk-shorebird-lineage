@@ -508,6 +508,15 @@ class Obfuscator : public ValueObject {
   // (or in other words: with those names that should not be renamed).
   void InitializeRenamingMap();
 
+  // SELFHOST: seed the renaming map from --load_obfuscation_map=<file>.
+  //
+  // Called ONLY on the fresh-start path of the constructor below, which is the
+  // single point at which the obfuscation state comes into existence. By the
+  // time any embedder-side API could run, kernel bootstrap has already built
+  // an Obfuscator and started issuing renames, so this is the only correct
+  // seam. See 0008's header.
+  void LoadObfuscationMapFromFile(const char* filename);
+
   // ObjectStore::obfuscation_map() is an Array with two elements:
   // first element is the last used rename and the second element is
   // renaming map.
@@ -548,6 +557,23 @@ class Obfuscator : public ValueObject {
     }
 
     void SaveState();
+
+    // SELFHOST: install one [original, renamed] pair from a loaded map.
+    //
+    // Both are interned with Symbols::New by the caller: ObfuscationMapTraits
+    // hashes on String CONTENT but matches on POINTER IDENTITY
+    // (precompiler.h, IsMatch is `a.ptr() == b.ptr()`), so a pair built from
+    // plain Strings would hash into the right bucket and never match --
+    // yielding a map that looks populated and renames as if it were empty.
+    void InsertLoadedRename(const String& original, const String& renamed);
+
+    // SELFHOST: restore the rename cursor from a reconstructed value.
+    // |cursor| must be NUL-terminated, [a-zA-Z] only, and shorter than
+    // sizeof(name_); the caller enforces this.
+    void SetCursor(const char* cursor);
+
+    // SELFHOST: the cursor, for the probe's benefit.
+    const char* cursor() const { return name_; }
 
     // Return a rename for the given |name|.
     //

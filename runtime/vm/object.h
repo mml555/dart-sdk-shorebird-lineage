@@ -3284,6 +3284,15 @@ class Function : public Object {
 #if defined(DART_DYNAMIC_MODULES)
   void AttachBytecode(const Bytecode& bytecode) const;
   void ClearBytecode() const;
+
+  // Route B (selfhost): the AOT-safe counterpart of ClearBytecode.
+  //
+  // ClearBytecode calls ClearCode, which is UNREACHABLE under
+  // DART_PRECOMPILED_RUNTIME and installs the LazyCompile stub in the JIT --
+  // correct there, meaningless in a runtime with no compiler. Rollback in AOT
+  // therefore has to put back the Code the release actually shipped, which the
+  // caller saved before attaching.
+  void RestoreCodeFromBytecode(const Code& original) const;
   inline BytecodePtr GetBytecode() const;
   static inline BytecodePtr GetBytecode(FunctionPtr function);
   inline bool HasBytecode() const;

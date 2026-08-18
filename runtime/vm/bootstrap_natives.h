@@ -273,6 +273,9 @@ namespace dart {
   V(Internal_prependTypeArguments, 4)                                          \
   V(Internal_instantiateClosure, 2)                                            \
   V(Internal_loadDynamicModule, 1)                                             \
+  V(Internal_attachBytecodeToFunction, 3)                                      \
+  V(Internal_detachBytecodeFromFunction, 2)                                    \
+  V(Internal_releaseBuildId, 0)                                                \
   V(Internal_allocateOneByteString, 1)                                         \
   V(Internal_allocateTwoByteString, 1)                                         \
   V(Internal_writeIntoOneByteString, 3)                                        \

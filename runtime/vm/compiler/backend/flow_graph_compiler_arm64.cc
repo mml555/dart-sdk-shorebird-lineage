@@ -27,6 +27,7 @@ namespace dart {
 
 DEFINE_FLAG(bool, trap_on_deoptimization, false, "Trap on deoptimization.");
 DECLARE_FLAG(bool, enable_simd_inline);
+DECLARE_FLAG(bool, patchable_static_calls);
 
 void FlowGraphCompiler::ArchSpecificInitialization() {
   if (FLAG_precompiled_mode) {
@@ -401,6 +402,54 @@ void FlowGraphCompiler::GenerateStaticDartCall(intptr_t deopt_id,
                                                const Function& target,
                                                Code::EntryKind entry_kind) {
   ASSERT(CanCallDart());
+#if defined(DART_DYNAMIC_MODULES)
+  if (FLAG_precompiled_mode && FLAG_patchable_static_calls) {
+    // Route B: the third call form. The two below both resolve the callee at
+    // compile time -- a PC-relative branch bakes its address, and the pool slot
+    // is patched by ProgramVisitor::BindStaticCalls to hold the callee's Code.
+    // Neither consults the Function, so Function::AttachBytecode cannot
+    // redirect them, which is what the kill gate kept observing: IsInterpreted
+    // flipped to 1 while every Dart call shape still ran the old body.
+    //
+    // This form dispatches through the Function itself:
+    //
+    //     R0 (FUNCTION_REG) <- the callee's Function, from the object pool
+    //     blr [R0 + Function::entry_point_]
+    //
+    // Normally entry_point_ IS the callee's AOT implementation, so the only
+    // cost is one pool entry and one extra load, and the callee is unchanged --
+    // a normal Dart entry does not read R0. After AttachBytecode, entry_point_
+    // is the InterpretCall stub, whose register contract is exactly what is in
+    // place here: R0 the Function, R4 the arguments descriptor.
+    //
+    // BOTH callers guarantee R4. EmitOptimizedStaticCall loads it above (its
+    // arguments_descriptor is never null -- GenerateStaticCall dereferences it
+    // in ASSERTs before passing it), and EmitTestAndCall loads it in
+    // EmitTestAndCallLoadReceiver. If a third caller ever appears, check that
+    // before assuming this still holds: the failure mode is a patched callee
+    // reading a stale descriptor, which will not look like a call-emission bug.
+    //
+    // R0 is safe to write. For a static call, LocationSummary is kCall, so
+    // every volatile register is clobbered and R0 is the call's *output*. For
+    // EmitTestAndCall, R0 holds the receiver only as scratch for the smi test,
+    // which has already happened by the time any branch calls; the cid lives in
+    // R2, and the arguments the callee reads are on the stack.
+    //
+    // Deliberately NOT calling AddStaticCallTarget. That records a
+    // Code::kCallViaCode site, and BindStaticCalls would then run
+    // CodePatcher::PatchStaticCallAt over a sequence that is not the pool-load
+    // shape that patcher expects. Nothing here needs patching anyway -- the
+    // indirection is resolved at run time, on every call -- and the Function
+    // stays alive through the object-pool reference this emits.
+    __ LoadObject(FUNCTION_REG, target);
+    CLOBBERS_LR(__ Call(compiler::FieldAddress(
+        FUNCTION_REG,
+        compiler::target::Function::entry_point_offset(entry_kind))));
+    EmitCallsiteMetadata(source, deopt_id, kind, locs,
+                         pending_deoptimization_env_);
+    return;
+  }
+#endif  // defined(DART_DYNAMIC_MODULES)
   if (CanPcRelativeCall(target)) {
     __ GenerateUnRelocatedPcRelativeCall();
     AddPcRelativeCallTarget(target, entry_kind);
@@ -607,6 +656,18 @@ void FlowGraphCompiler::EmitOptimizedStaticCall(
   ASSERT(!function.IsClosureFunction());
   if (function.PrologueNeedsArgumentsDescriptor()) {
     __ LoadObject(ARGS_DESC_REG, arguments_descriptor);
+#if defined(DART_DYNAMIC_MODULES)
+  } else if (FLAG_precompiled_mode && !arguments_descriptor.IsNull()) {
+    // Patchability (selfhost): if this callee's body is later replaced with
+    // bytecode, the call enters through the InterpretCall stub, which reads the
+    // arguments descriptor out of ARGS_DESC_REG. Nothing else supplies it for a
+    // resolved static call in AOT, so the stub read garbage and faulted.
+    //
+    // The descriptor is a compile-time constant here, so this costs one pool
+    // entry plus one load per static call site, and only when dynamic modules
+    // are enabled -- stock builds are untouched.
+    __ LoadObject(ARGS_DESC_REG, arguments_descriptor);
+#endif
   } else {
     if (!FLAG_precompiled_mode) {
       __ LoadImmediate(ARGS_DESC_REG, 0);  // GC safe smi zero because of stub.

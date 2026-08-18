@@ -4319,6 +4319,65 @@ Dart_GetObfuscationMap(uint8_t** buffer, intptr_t* buffer_length);
 DART_EXPORT bool Dart_IsPrecompiledRuntime(void);
 
 /**
+ * Route B (selfhost): why an activation attempt ended the way it did.
+ *
+ * Distinct codes rather than a bool because every one of these has a different
+ * cause and a different fix, and collapsing them is how a stale payload ends up
+ * reported as a mechanism failure. In particular kTargetMissing (a retention or
+ * URI problem) must never be confused with kInvalidBytecode (a producer or
+ * corruption problem).
+ */
+typedef enum {
+  Dart_RouteB_Ok = 0,
+  Dart_RouteB_NoIsolate = 1,
+  Dart_RouteB_EmptyPayload = 2,
+  Dart_RouteB_InvalidBytecode = 3,
+  Dart_RouteB_TargetMissing = 4,
+  Dart_RouteB_AlreadyInterpreted = 5,
+  Dart_RouteB_AttachFailed = 6,
+  Dart_RouteB_Unsupported = 7,
+  Dart_RouteB_OutOfMemory = 8,
+} Dart_RouteBResult;
+
+/**
+ * Route B (selfhost): activate a patch on the CURRENT isolate.
+ *
+ * Replaces the body of \p target_name in \p library_uri with \p payload,
+ * to be executed by the interpreter, and records the original Code so the
+ * change can be reverted.
+ *
+ * Intended to be called from the embedder's root-isolate-create callback --
+ * after the isolate reaches Phase::Ready and before the Dart entrypoint runs --
+ * so a patch is live before any user Dart executes and no app cooperation is
+ * required. The isolate must be current.
+ *
+ * The embedder supplies the bytes AND validates the container they came from:
+ * I/O and format belong to the embedder, attachment belongs to the VM. This
+ * function knows nothing about containers, releases or JSON.
+ *
+ * \return Dart_RouteB_Ok on success. On any failure nothing is attached, so
+ * the caller may proceed into unpatched app code.
+ */
+DART_EXPORT int32_t Dart_RouteBActivatePatch(const uint8_t* payload,
+                                             intptr_t payload_length,
+                                             const char* library_uri,
+                                             const char* target_name);
+
+/**
+ * Route B (selfhost): the running snapshot's GNU build ID as lowercase hex.
+ *
+ * The release identity a patch container must match. Callable from the
+ * root-isolate-create callback, which is the only place the check can happen
+ * early enough to refuse a wrong-release patch before any target is resolved.
+ *
+ * \return a malloc'd string the caller must free(), or NULL if this build has
+ * no snapshot identity (a JIT run, or a snapshot without a build ID). NULL
+ * means "no identity", never "any identity" -- callers must refuse rather than
+ * proceed.
+ */
+DART_EXPORT char* Dart_RouteBReleaseBuildId(void);
+
+/**
  *  Print a native stack trace. Used for crash handling.
  *
  *  If context is NULL, prints the current stack trace. Otherwise, context

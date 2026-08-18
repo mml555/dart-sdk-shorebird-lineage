@@ -477,6 +477,33 @@ Future<Object?> loadDynamicModule({Uri? uri, Uint8List? bytes}) {
 external Object? _loadDynamicModule(Uint8List bytes);
 
 @patch
+bool attachBytecodeToFunction(
+  Uint8List bytecode,
+  String libraryUri,
+  String targetName,
+) => _attachBytecodeToFunction(bytecode, libraryUri, targetName);
+
+@pragma("vm:external-name", "Internal_attachBytecodeToFunction")
+external bool _attachBytecodeToFunction(
+  Uint8List bytecode,
+  String libraryUri,
+  String targetName,
+);
+
+@patch
+bool detachBytecodeFromFunction(String libraryUri, String targetName) =>
+    _detachBytecodeFromFunction(libraryUri, targetName);
+
+@pragma("vm:external-name", "Internal_detachBytecodeFromFunction")
+external bool _detachBytecodeFromFunction(String libraryUri, String targetName);
+
+@patch
+String? releaseBuildId() => _releaseBuildId();
+
+@pragma("vm:external-name", "Internal_releaseBuildId")
+external String? _releaseBuildId();
+
+@patch
 @pragma("vm:entry-point")
 abstract interface class IsolateGroup {
   @patch

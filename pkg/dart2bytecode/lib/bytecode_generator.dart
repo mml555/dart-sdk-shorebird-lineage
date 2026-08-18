@@ -729,12 +729,51 @@ class BytecodeGenerator extends RecursiveVisitor {
           if (dynModuleEntryPoint != null) {
             throw 'Duplicate Dynamic Module Entry Points: $dynModuleEntryPoint and $member';
           }
+          // Route B (selfhost), G3.7: ANY number of REQUIRED POSITIONAL
+          // parameters.
+          //
+          // The narrowing this removes was deliberate, so removing it has to be
+          // too. Upstream allowed zero. Patch 0004 relaxed it to "zero or one",
+          // because a replacement for an INSTANCE method is compiled as a
+          // synthetic top-level function and the only way it can name the
+          // receiver is as an ordinary first parameter -- and it capped there on
+          // purpose, so that "relax the restriction" could not quietly become a
+          // general arity change before anyone had measured one.
+          //
+          // This IS that general arity change, measured on its own. A target with
+          // its own parameters lowers to `f(Receiver self, T1 a, ...)`, so the cap
+          // at one is precisely what made the largest measured slice of real
+          // methods unpatchable: 33.2 % structural reach, and parameters appear in
+          // 6 of 10 real patches.
+          //
+          // WHAT STAYS REFUSED, each for its own reason:
+          //   * non-static           a dynamic module entry point is resolved
+          //                          without a receiver; instance-ness needs a
+          //                          different resolution path.
+          //   * type parameters      generic instantiation is not carried by the
+          //                          payload.
+          //   * named parameters     the call site passes them through an
+          //                          ArgumentsDescriptor whose names must match;
+          //                          not exercised, so not allowed.
+          //   * optional positionals their default values live in the AOT
+          //                          function the replacement stands in for, and
+          //                          nothing carries them across yet. This is why
+          //                          the test is requiredParameterCount ==
+          //                          positionalParameters.length rather than a
+          //                          bare length check.
+          //
+          // Still no receiver intrinsic and no VM change: the AOT call site
+          // already pushes (receiver, a, b, ...) per its own ArgumentsDescriptor,
+          // and what this answers is whether the interpreted entry point binds
+          // them positionally as they arrive.
           if (!(member is Procedure &&
               member.isStatic &&
               function.typeParameters.isEmpty &&
-              function.positionalParameters.isEmpty &&
+              function.requiredParameterCount ==
+                  function.positionalParameters.length &&
               function.namedParameters.isEmpty)) {
-            throw 'Dynamic Module Entry Point should be a static no-argument method: $member';
+            throw 'Dynamic Module Entry Point should be a static method with '
+                'only required positional parameters: $member';
           }
           dynModuleEntryPoint = member;
           bytecodeComponent.dynModuleEntryPoint = objectTable.getHandle(member);

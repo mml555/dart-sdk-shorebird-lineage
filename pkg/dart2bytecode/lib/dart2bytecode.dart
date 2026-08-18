@@ -86,6 +86,16 @@ final ArgParser _argParser = ArgParser(allowTrailingOptions: true)
     help: 'Import libraries from existing dill file',
     defaultsTo: null,
   )
+  ..addOption(
+    'resolve-private-names-in-library',
+    help:
+        'Import URI of a library from --import-dill whose PRIVATE namespace the '
+        'input may resolve names in, as well as its own. Dart privacy is '
+        'library-scoped, so generated code compiled as its own library cannot '
+        'otherwise name an application private member. Off by default; the '
+        'library must be present in --import-dill.',
+    defaultsTo: null,
+  )
   ..addFlag(
     'enable-asserts',
     help: 'Whether asserts will be enabled.',
@@ -183,6 +193,8 @@ Future<int> runCompilerWithCommandLineArguments(List<String> arguments) async {
   }
 
   final String? importDill = options['import-dill'];
+  final String? resolvePrivateNamesInLibrary =
+      options['resolve-private-names-in-library'];
   final String? validateDynamicInterface = options['validate'];
   final String messageVerbosity = options['verbosity'];
   final String cfeInvocationModes = options['invocation-modes'];
@@ -197,6 +209,7 @@ Future<int> runCompilerWithCommandLineArguments(List<String> arguments) async {
     targetName: targetName,
     packages: packages,
     importDill: importDill,
+    resolvePrivateNamesInLibrary: resolvePrivateNamesInLibrary,
     validateDynamicInterface: validateDynamicInterface,
     enableAsserts: enableAsserts,
     experimentalFlags: experimentalFlags,
@@ -222,6 +235,7 @@ Future<int> runCompilerWithOptions({
   required String targetName,
   String? packages,
   String? importDill,
+  String? resolvePrivateNamesInLibrary,
   String? validateDynamicInterface,
   bool enableAsserts = false,
   List<String>? experimentalFlags,
@@ -275,6 +289,12 @@ Future<int> runCompilerWithOptions({
     ..additionalDills = additionalDills
     ..packagesFileUri = packagesUri
     ..dynamicInterfaceSpecificationUri = dynamicInterfaceSpecificationUri
+    // Parsed with Uri.parse, not resolveInputUri: this is a library IMPORT URI
+    // (package:app/main.dart), not a filesystem path, and resolving it against
+    // the CWD would produce a file: URI that matches no dill library.
+    ..resolvePrivateNamesInLibrary = resolvePrivateNamesInLibrary == null
+        ? null
+        : Uri.parse(resolvePrivateNamesInLibrary)
     ..explicitExperimentalFlags = parseExperimentalFlags(
       parseExperimentalArguments(experimentalFlags),
       onError: printMessage,

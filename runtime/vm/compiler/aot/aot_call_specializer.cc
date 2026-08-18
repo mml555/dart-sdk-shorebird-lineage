@@ -1189,9 +1189,43 @@ void AotCallSpecializer::TryReplaceWithDispatchTableCall(
     return;
   }
 
+  // SELFHOST: the _HashVMBase slot accessors must never become a call of any
+  // kind. They are @pragma("vm:recognized", "graph-intrinsic") `external`
+  // declarations with NO callable body — the only valid lowering is the
+  // intrinsic's LoadField/StoreField — so a real call returns garbage instead
+  // of the field.
+  //
+  // Observed: reading `_table._data` twice in ONE expression produced two
+  // non-identical objects with different identity hashes whose `.length` was
+  // null. _isModifiedSince then reported a bogus "Concurrent modification
+  // during iteration" and killed every widget build before first frame.
+  //
+  // Keep this list narrow. Excluding *all* recognized methods also excludes
+  // _Array.[] and _Array.get:length, which do have bodies and DO need their
+  // dispatch-table entries — dropping those brings back the
+  // NoSuchMethodError in Map._fromLiteral that 0004 fixed.
+  switch (interface_target.recognized_kind()) {
+    case MethodRecognizer::kLinkedHashBase_getIndex:
+    case MethodRecognizer::kLinkedHashBase_setIndex:
+    case MethodRecognizer::kLinkedHashBase_getData:
+    case MethodRecognizer::kLinkedHashBase_setData:
+    case MethodRecognizer::kLinkedHashBase_getUsedData:
+    case MethodRecognizer::kLinkedHashBase_setUsedData:
+    case MethodRecognizer::kLinkedHashBase_getHashMask:
+    case MethodRecognizer::kLinkedHashBase_setHashMask:
+    case MethodRecognizer::kLinkedHashBase_getDeletedKeys:
+    case MethodRecognizer::kLinkedHashBase_setDeletedKeys:
+    case MethodRecognizer::kImmutableLinkedHashBase_getData:
+    case MethodRecognizer::kImmutableLinkedHashBase_getIndex:
+      return;
+    default:
+      break;
+  }
+
   Value* receiver = call->ArgumentValueAt(call->FirstArgIndex());
   const compiler::TableSelector* selector =
       precompiler_->selector_map()->GetSelector(interface_target);
+
 
   if (selector == nullptr) {
 #if defined(DEBUG)

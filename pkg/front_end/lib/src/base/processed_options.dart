@@ -134,6 +134,10 @@ class ProcessedOptions {
   Uri? get dynamicInterfaceSpecificationUri =>
       _raw.dynamicInterfaceSpecificationUri;
 
+  /// Import URI of a library whose private namespace the compiled sources may
+  /// also resolve names in. See [CompilerOptions.resolvePrivateNamesInLibrary].
+  Uri? get resolvePrivateNamesInLibrary => _raw.resolvePrivateNamesInLibrary;
+
   String? _dynamicInterfaceSpecificationContents;
   bool _triedLoadingDynamicInterfaceSpecification = false;
 

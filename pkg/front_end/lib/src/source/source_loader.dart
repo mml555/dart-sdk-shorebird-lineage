@@ -414,6 +414,39 @@ class SourceLoader extends Loader implements ProblemReportingHelper {
     required bool mayImplementRestrictedTypes,
   }) {
     final bool isDartLib = importUri.isScheme('dart');
+    // Normally null: a source library resolves names in its own namespace only,
+    // which is what Dart's library-scoped privacy means.
+    //
+    // `CompilerOptions.resolvePrivateNamesInLibrary` opts a compile into the same
+    // mechanism the debugger uses for expression evaluation, where an expression
+    // typed at a breakpoint must see the private namespace of the library it is
+    // evaluated in (see `IncrementalCompiler`, which passes a `LibraryBuilder`
+    // here directly). The target arrives as a dill, so this is a dill library
+    // builder -- and a dill library's OWN namespace does contain its privates;
+    // it is the EXPORT namespace that filters them.
+    //
+    // Never applied to `dart:` libraries: the option exists to let generated code
+    // act as part of an application library, and nothing should be able to widen
+    // resolution into the platform this way.
+    LibraryBuilder? resolveInLibrary;
+    final Uri? resolvePrivateNamesIn =
+        target.context.options.resolvePrivateNamesInLibrary;
+    if (resolvePrivateNamesIn != null && !isDartLib) {
+      resolveInLibrary = target.dillTarget.loader.lookupLibraryBuilder(
+        resolvePrivateNamesIn,
+      );
+      if (resolveInLibrary == null) {
+        // Fail loudly rather than compiling with narrower resolution than asked
+        // for: silently ignoring this yields "private member not found" errors
+        // pointing at the replacement source, which sends the reader to debug
+        // the wrong half.
+        throw new StateError(
+          "resolvePrivateNamesInLibrary was set to '$resolvePrivateNamesIn' "
+          "but no such library is available to this compile. It must be "
+          "supplied via additionalDills (--import-dill).",
+        );
+      }
+    }
     return new SourceCompilationUnitImpl(
       importUri: importUri,
       fileUri: fileUri,
@@ -422,7 +455,7 @@ class SourceLoader extends Loader implements ProblemReportingHelper {
       packageLanguageVersion: packageLanguageVersion,
       loader: this,
       augmentationRoot: origin,
-      resolveInLibrary: null,
+      resolveInLibrary: resolveInLibrary,
       indexedLibrary: referencesFromIndex,
       referenceIsPartOwner: referenceIsPartOwner,
       conditionalImportSupported:

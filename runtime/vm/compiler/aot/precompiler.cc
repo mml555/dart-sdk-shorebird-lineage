@@ -34,6 +34,7 @@
 #include "vm/compiler/frontend/flow_graph_builder.h"
 #include "vm/compiler/frontend/kernel_to_il.h"
 #include "vm/compiler/jit/compiler.h"
+#include "vm/dart.h"
 #include "vm/dart_entry.h"
 #include "vm/exceptions.h"
 #include "vm/ffi/native_assets.h"
@@ -79,6 +80,82 @@ DEFINE_FLAG(charp,
             nullptr,
             "Print reasons for retaining objects to the given file");
 
+// SELFHOST: Shorebird's private Dart fork defines these six, and their
+// flutter_tools passes ALL of them on every iOS/macOS AOT build —
+// packages/flutter_tools/lib/src/base/build.dart, gated only on
+// `usesLinker = (platform == ios || darwin)`. A vanilla gen_snapshot rejects
+// them outright ("Setting VM flags failed: Unrecognized flags: ...") and exits
+// 255, which makes EVERY iOS release unbuildable on vanilla Dart — not merely
+// un-patchable. Registering them is what lets an iOS release build at all.
+//
+// Upstream they dump the class/field/dispatch table layout so a later patch can
+// be linked against the same layout. We have no linker yet (UPSTREAM_INDEPENDENCE
+// item 7), so we accept the flags and write a file that is deliberately NOT link
+// info: a real linker fed this must fail loudly rather than quietly mislink
+// against a plausible-looking empty table. Writing *something* matters because
+// the release flow collects these paths as "supplement" artifacts.
+//
+DEFINE_FLAG(charp,
+            print_class_table_link_info_to,
+            nullptr,
+            "SELFHOST stub: accepted for flutter_tools compatibility");
+DEFINE_FLAG(charp,
+            print_class_table_link_debug_info_to,
+            nullptr,
+            "SELFHOST stub: accepted for flutter_tools compatibility");
+DEFINE_FLAG(charp,
+            print_field_table_link_info_to,
+            nullptr,
+            "SELFHOST stub: accepted for flutter_tools compatibility");
+DEFINE_FLAG(charp,
+            print_field_table_link_debug_info_to,
+            nullptr,
+            "SELFHOST stub: accepted for flutter_tools compatibility");
+DEFINE_FLAG(charp,
+            print_dispatch_table_link_info_to,
+            nullptr,
+            "SELFHOST stub: accepted for flutter_tools compatibility");
+DEFINE_FLAG(charp,
+            print_dispatch_table_link_debug_info_to,
+            nullptr,
+            "SELFHOST stub: accepted for flutter_tools compatibility");
+
+namespace {
+// Writes a self-describing marker to `filename`, chosen so nothing can mistake
+// it for real link info: it is not a table, and any parser expecting one rejects
+// it.
+// [[maybe_unused]]: this file is also compiled into the JIT compiler variant
+// (libdart_compiler_jit), where the call site below sits inside a
+// DART_PRECOMPILER guard and disappears. Without this, -Werror=unused-function
+// breaks any host build that compiles the JIT variant — which the iOS-only
+// build does not, so it compiles clean there and fails later somewhere else.
+[[maybe_unused]] void WriteSelfhostLinkInfoStub(const char* filename,
+                                                const char* which) {
+  auto file_open = Dart::file_open_callback();
+  auto file_write = Dart::file_write_callback();
+  auto file_close = Dart::file_close_callback();
+  if ((file_open == nullptr) || (file_write == nullptr) ||
+      (file_close == nullptr)) {
+    OS::PrintErr("warning: Could not access file callbacks.\n");
+    return;
+  }
+  void* file = file_open(filename, /*write=*/true);
+  if (file == nullptr) {
+    OS::PrintErr("warning: Failed to write link info stub: %s\n", filename);
+    return;
+  }
+  char buffer[512];
+  const intptr_t len = Utils::SNPrint(
+      buffer, sizeof(buffer),
+      "{\"selfhost_link_info\":\"unimplemented\",\"table\":\"%s\","
+      "\"note\":\"No AOT linker in this build; not link info.\"}\n",
+      which);
+  file_write(buffer, len, file);
+  file_close(file);
+}
+
+}  // namespace
+
 DECLARE_FLAG(bool, print_flow_graph);
 DECLARE_FLAG(bool, print_flow_graph_optimized);
 DECLARE_FLAG(bool, trace_compiler);
@@ -88,6 +165,34 @@ DECLARE_FLAG(bool, trace_failed_optimization_attempts);
 DECLARE_FLAG(bool, trace_inlining_intervals);
 DECLARE_FLAG(int, inlining_hotness);
 DECLARE_FLAG(int, inlining_size_threshold);
+
+// SELFHOST: --load_obfuscation_map, the VM half of gen_snapshot's
+// --load-obfuscation-map=<file>. The help text is reproduced verbatim from the
+// Shorebird fork binary's string table (see 0008's header): that binary also
+// carried the option as a VM flag, forwarded from bin/ as
+// "--load_obfuscation_map=%s", which is why no new Dart_* API exists in it.
+DEFINE_FLAG(charp,
+            load_obfuscation_map,
+            nullptr,
+            "Path to a JSON obfuscation map file to load before kernel "
+            "translation. Used for consistent obfuscation across patch builds.");
+
+// SELFHOST: an instrument, not a knob. The JSON map carries PAIRS ONLY, so the
+// rename cursor must be reconstructed; a cursor that lands even slightly early
+// silently reissues obfuscated names the release already spent. Mode 1 is the
+// only correct setting and is the default. Modes 0 and 2 exist so that
+// probes/g43_obfuscation_map_load.sh can demonstrate it can SEE the failure --
+// a probe that cannot fail proves nothing.
+//
+//   0  do not restore the cursor (restart at 'a') -- the naive implementation
+//   1  restore correctly (bijective base-52, little-endian)  [DEFAULT, ships]
+//   2  restore using lowercase-only ordering -- a REFUTED rule, kept only so
+//      the probe can show it distinguishes "correct" from "almost correct"
+DEFINE_FLAG(int,
+            obfuscation_cursor_mode,
+            1,
+            "SELFHOST probe instrument: 0=no cursor restore, 1=correct "
+            "(default), 2=refuted lowercase-only rule");
 DECLARE_FLAG(int, inlining_callee_size_threshold);
 DECLARE_FLAG(int, inline_getters_setters_smaller_than);
 DECLARE_FLAG(int, inlining_depth_threshold);
@@ -473,6 +578,26 @@ void Precompiler::DoCompileAll() {
 
       if (FLAG_print_object_layout_to != nullptr) {
         IG->class_table()->PrintObjectLayout(FLAG_print_object_layout_to);
+      }
+
+      // SELFHOST: satisfy the six link-info paths flutter_tools always passes on
+      // Apple targets. See the flag declarations above for why these are stubs.
+      struct {
+        const char* path;
+        const char* which;
+      } selfhost_link_info[] = {
+          {FLAG_print_class_table_link_info_to, "class_table"},
+          {FLAG_print_class_table_link_debug_info_to, "class_table_debug"},
+          {FLAG_print_field_table_link_info_to, "field_table"},
+          {FLAG_print_field_table_link_debug_info_to, "field_table_debug"},
+          {FLAG_print_dispatch_table_link_info_to, "dispatch_table"},
+          {FLAG_print_dispatch_table_link_debug_info_to,
+           "dispatch_table_debug"},
+      };
+      for (const auto& entry : selfhost_link_info) {
+        if (entry.path != nullptr) {
+          WriteSelfhostLinkInfoStub(entry.path, entry.which);
+        }
       }
 
       ClassFinalizer::SortClasses();
@@ -1734,9 +1859,12 @@ void Precompiler::CheckForNewDynamicFunctions() {
             metadata = kernel::ProcedureAttributesOf(function, Z);
             found_metadata = true;
 
+            // SELFHOST: upstream, has_tearoff_uses gate included. Dropping it
+            // was how we survived a dill whose tear-off flags were not real —
+            // see selfhost/TFA_ROOT_CAUSE.md. Correct again once the frontend
+            // comes from this same tree.
             if (metadata.has_tearoff_uses) {
-              // Closurization.
-              // Function is foo and somewhere get:foo is called.
+              // Closurization: function is foo and somewhere get:foo is called.
               function2 = function.ImplicitClosureFunction();
               AddFunction(function2, RetainReasons::kImplicitClosure);
 
@@ -3717,6 +3845,350 @@ void Precompiler::CompileFunction(Precompiler* precompiler,
   }
 }
 
+// SELFHOST: --load_obfuscation_map support begins here.
+//
+// Seeds the renaming map from a JSON map written by an earlier
+// --save-obfuscation-map run, so a patch build reproduces the release's naming
+// exactly. See selfhost/engine/0008-dart-load-obfuscation-map.patch's header
+// for the derivation and for why this lives here rather than behind a Dart_*
+// API called from bin/.
+
+namespace {
+
+// The rename alphabet, read off NextName() below: inc(a)=b .. inc(z)=A ..
+// inc(Z)=a & carry, and a fresh position starts at 'a'. name_[0] is therefore
+// the LEAST significant digit and the generated order is
+//   a, b, .. z, A, .. Z, aa, ba, ca, ..
+// i.e. a bijective base-52 numeral written little-endian. Two consequences
+// that a "greatest-looking string" rule gets wrong:
+//   * the alphabet is [a-zA-Z], not [a-z]. Restricting to lowercase discards
+//     every value carrying an uppercase digit; against a 19,830-pair map
+//     (release 35's) that lands the cursor ~2,400 names early, and each of
+//     those names is already bound to a different identifier.
+//   * the most significant digit is the LAST character, so plain lexicographic
+//     comparison reads the numeral backwards.
+constexpr intptr_t kCursorLowercaseDigits = 26;
+
+// Rank of a cursor digit in generation order, or -1 if not a cursor digit.
+intptr_t CursorDigitRank(char c) {
+  if (c >= 'a' && c <= 'z') return c - 'a';
+  if (c >= 'A' && c <= 'Z') return kCursorLowercaseDigits + (c - 'A');
+  return -1;
+}
+
+bool IsCursorWord(const char* s, intptr_t len) {
+  if (len <= 0) return false;
+  for (intptr_t i = 0; i < len; i++) {
+    if (CursorDigitRank(s[i]) < 0) return false;
+  }
+  return true;
+}
+
+// True if |a| comes strictly later than |b| in NextName()'s order. Length
+// first -- the numeral is bijective, so a longer name is always later -- then
+// digits from the most significant end, which is the last character.
+bool CursorLater(const char* a, intptr_t alen, const char* b, intptr_t blen) {
+  if (alen != blen) return alen > blen;
+  for (intptr_t i = alen - 1; i >= 0; i--) {
+    const intptr_t ra = CursorDigitRank(a[i]);
+    const intptr_t rb = CursorDigitRank(b[i]);
+    if (ra != rb) return ra > rb;
+  }
+  return false;
+}
+
+// The REFUTED rule, reachable only via --obfuscation_cursor_mode=2. Kept so
+// probes/g43_obfuscation_map_load.sh can show it distinguishes "correct" from
+// "almost correct" rather than merely "present" from "absent". Wrong twice
+// over: it discards uppercase-bearing values, and it compares a little-endian
+// numeral as if it were big-endian.
+bool CursorLaterLowercaseOnly(const char* a,
+                              intptr_t alen,
+                              const char* b,
+                              intptr_t blen) {
+  if (alen != blen) return alen > blen;
+  return strncmp(a, b, alen) > 0;
+}
+
+bool IsAllLowercase(const char* s, intptr_t len) {
+  for (intptr_t i = 0; i < len; i++) {
+    if (s[i] < 'a' || s[i] > 'z') return false;
+  }
+  return len > 0;
+}
+
+// Reduce an obfuscated VALUE to the bare generated name it was built from,
+// returning false if it was not produced by NewAtomicRename.
+//
+// BuildRename composes: Rename(get:foo) = get:Rename(foo),
+// Rename(set:foo) = set:Rename(foo), Rename(_ident@key) =
+// Rename(_ident)@private_key, and NewAtomicRename prefixes '_' for private
+// names. So: drop a get:/set: prefix, cut at '@', then drop a leading '_'.
+bool GeneratedNameOf(const char* v,
+                     intptr_t vlen,
+                     const char** out,
+                     intptr_t* out_len) {
+  if (vlen >= 4 &&
+      (strncmp(v, "get:", 4) == 0 || strncmp(v, "set:", 4) == 0)) {
+    v += 4;
+    vlen -= 4;
+  }
+  for (intptr_t i = 0; i < vlen; i++) {
+    if (v[i] == '@') {
+      vlen = i;
+      break;
+    }
+  }
+  if (vlen > 0 && v[0] == '_') {
+    v++;
+    vlen--;
+  }
+  if (!IsCursorWord(v, vlen)) return false;
+  *out = v;
+  *out_len = vlen;
+  return true;
+}
+
+// A hand-written parser for the flat JSON array of strings that
+// Dart_GetObfuscationMap writes (dart_api_impl.cc: '[' then comma-separated
+// '"'-quoted AddEscapedString values then ']'). Measured against the real
+// 629 KB map our own engine produced for release 35: a flat array of even
+// length, consecutive [original, renamed] pairs, 39,660 entries, and it DOES
+// contain empty-string pairs -- which are tolerated, not rejected.
+//
+// The four diagnostic strings are reproduced verbatim from the Shorebird fork
+// binary's string table.
+class ObfuscationMapParser : public ValueObject {
+ public:
+  ObfuscationMapParser(Zone* zone, const char* buffer, intptr_t length)
+      : zone_(zone), p_(buffer), end_(buffer + length) {}
+
+  void ParseInto(GrowableArray<const char*>* out) {
+    SkipWhitespace();
+    if (p_ >= end_ || *p_ != '[') {
+      FATAL("Invalid obfuscation map: expected '['");
+    }
+    p_++;
+    SkipWhitespace();
+    if (p_ < end_ && *p_ == ']') {
+      return;  // A legitimately empty map.
+    }
+    for (;;) {
+      SkipWhitespace();
+      out->Add(ParseString());
+      SkipWhitespace();
+      if (p_ < end_ && *p_ == ',') {
+        p_++;
+        continue;
+      }
+      break;
+    }
+    if ((out->length() % 2) != 0) {
+      FATAL("Invalid obfuscation map: odd number of entries (expected pairs)");
+    }
+  }
+
+ private:
+  void SkipWhitespace() {
+    while (p_ < end_ && (*p_ == ' ' || *p_ == '\t' || *p_ == '\n' ||
+                         *p_ == '\r')) {
+      p_++;
+    }
+  }
+
+  // The writer emits bytes >= 0x80 raw (text_buffer.cc, AddEscapedUTF8) and
+  // uses \u only for ASCII control units, so no surrogate pairing is needed.
+  void AppendUtf8(ZoneTextBuffer* out, uint32_t rune) {
+    if (rune < 0x80) {
+      out->AddChar(static_cast<char>(rune));
+    } else if (rune < 0x800) {
+      out->AddChar(static_cast<char>(0xC0 | (rune >> 6)));
+      out->AddChar(static_cast<char>(0x80 | (rune & 0x3F)));
+    } else {
+      out->AddChar(static_cast<char>(0xE0 | (rune >> 12)));
+      out->AddChar(static_cast<char>(0x80 | ((rune >> 6) & 0x3F)));
+      out->AddChar(static_cast<char>(0x80 | (rune & 0x3F)));
+    }
+  }
+
+  const char* ParseString() {
+    if (p_ >= end_ || *p_ != '"') {
+      FATAL("Invalid obfuscation map: expected '\"'");
+    }
+    p_++;
+    ZoneTextBuffer out(zone_);
+    for (;;) {
+      if (p_ >= end_) {
+        FATAL("Invalid obfuscation map: unterminated string");
+      }
+      const char c = *p_++;
+      if (c == '"') break;
+      if (c != '\\') {
+        out.AddChar(c);
+        continue;
+      }
+      if (p_ >= end_) {
+        FATAL("Invalid obfuscation map: unterminated string");
+      }
+      const char e = *p_++;
+      switch (e) {
+        case 'b': out.AddChar('\b'); break;
+        case 'f': out.AddChar('\f'); break;
+        case 'n': out.AddChar('\n'); break;
+        case 'r': out.AddChar('\r'); break;
+        case 't': out.AddChar('\t'); break;
+        case 'u': {
+          if (end_ - p_ < 4) {
+            FATAL("Invalid obfuscation map: unterminated string");
+          }
+          uint32_t rune = 0;
+          for (intptr_t i = 0; i < 4; i++) {
+            const char h = *p_++;
+            rune <<= 4;
+            if (h >= '0' && h <= '9') {
+              rune |= (h - '0');
+            } else if (h >= 'a' && h <= 'f') {
+              rune |= (h - 'a' + 10);
+            } else if (h >= 'A' && h <= 'F') {
+              rune |= (h - 'A' + 10);
+            } else {
+              FATAL("Invalid obfuscation map: expected '\"'");
+            }
+          }
+          AppendUtf8(&out, rune);
+          break;
+        }
+        default:
+          // Covers the writer's '"', '\\' and '/' cases, and is forgiving of
+          // any other escape rather than rejecting a map we could still use.
+          out.AddChar(e);
+          break;
+      }
+    }
+    return out.buffer();
+  }
+
+  Zone* zone_;
+  const char* p_;
+  const char* end_;
+};
+
+// Guards a second seed within one process. Unreachable through gen_snapshot,
+// which builds a single isolate group, but the fork binary carried this
+// diagnostic and it is a real guard rather than a dead string.
+bool obfuscation_map_loaded = false;
+
+}  // namespace
+
+void Obfuscator::LoadObfuscationMapFromFile(const char* filename) {
+  Thread* thread = Thread::Current();
+  Zone* zone = thread->zone();
+
+  if (obfuscation_map_loaded) {
+    FATAL("Obfuscation map is already initialized.");
+  }
+  obfuscation_map_loaded = true;
+
+  Dart_FileOpenCallback file_open = Dart::file_open_callback();
+  Dart_FileReadCallback file_read = Dart::file_read_callback();
+  Dart_FileCloseCallback file_close = Dart::file_close_callback();
+  if (file_open == nullptr || file_read == nullptr || file_close == nullptr) {
+    FATAL("Could not load obfuscation map: file callbacks not set");
+  }
+
+  void* stream = file_open(filename, /*write=*/false);
+  if (stream == nullptr) {
+    FATAL("Could not open obfuscation map file: %s", filename);
+  }
+  uint8_t* buffer = nullptr;
+  intptr_t length = 0;
+  file_read(&buffer, &length, stream);
+  file_close(stream);
+  if (buffer == nullptr || length < 0) {
+    FATAL("Could not open obfuscation map file: %s", filename);
+  }
+
+  GrowableArray<const char*> entries;
+  {
+    ObfuscationMapParser parser(zone, reinterpret_cast<const char*>(buffer),
+                                length);
+    parser.ParseInto(&entries);
+  }
+  free(buffer);
+
+  // Install the pairs. Interning with Symbols::New is load-bearing:
+  // ObfuscationMapTraits hashes on content but matches on POINTER IDENTITY, so
+  // plain Strings would produce a map that looks populated and renames as if
+  // it were empty.
+  String& original = String::Handle(zone);
+  String& renamed = String::Handle(zone);
+  for (intptr_t i = 0; i + 1 < entries.length(); i += 2) {
+    if (entries[i][0] == '\0') {
+      continue;  // Empty-string pairs occur in real maps and carry nothing.
+    }
+    original = Symbols::New(thread, entries[i]);
+    renamed = Symbols::New(thread, entries[i + 1]);
+    state_->InsertLoadedRename(original, renamed);
+  }
+
+  if (FLAG_obfuscation_cursor_mode == 0) {
+    // The naive implementation: restart the sequence at 'a'. Retained as a
+    // probe mode precisely because it is wrong -- by NewAtomicRename's
+    // do/while, which rejects only IDENTITY renames, it hands a second
+    // identifier a name the release already spent.
+    return;
+  }
+
+  // Reconstruct the cursor as the greatest name the loaded map shows as
+  // having been generated. Names skipped by NewAtomicRename's identity check
+  // were never inserted, so this can trail the true cursor -- but only across
+  // names that are identity renames in this very map, which the same check
+  // will skip again. The reconstruction is therefore exact in effect.
+  const char* best = nullptr;
+  intptr_t best_len = 0;
+  for (intptr_t i = 0; i + 1 < entries.length(); i += 2) {
+    const char* key = entries[i];
+    const char* value = entries[i + 1];
+    if (key[0] == '\0') continue;
+    // Identity renames are PreventRenaming entries -- real Dart identifiers
+    // such as "dynamic" or "_RandomAccessFileOpsImpl", not generated names.
+    // Counting them would push the cursor arbitrarily far.
+    if (strcmp(key, value) == 0) continue;
+
+    const char* cand = nullptr;
+    intptr_t cand_len = 0;
+    if (!GeneratedNameOf(value, strlen(value), &cand, &cand_len)) continue;
+
+    if (FLAG_obfuscation_cursor_mode == 2) {
+      if (!IsAllLowercase(cand, cand_len)) continue;
+      if (best == nullptr ||
+          CursorLaterLowercaseOnly(cand, cand_len, best, best_len)) {
+        best = cand;
+        best_len = cand_len;
+      }
+    } else if (best == nullptr ||
+               CursorLater(cand, cand_len, best, best_len)) {
+      best = cand;
+      best_len = cand_len;
+    }
+  }
+
+  if (best == nullptr) return;  // Nothing generated yet; 'a' is correct.
+
+  // name_ is char[100] and NextName()'s carry loop terminates only on the
+  // zero tail, while String::ToUTF8's bound is an ASSERT that is compiled out
+  // in release builds. Refuse rather than overrun.
+  if (best_len >= 64) {
+    FATAL("Invalid obfuscation map: implausible rename cursor of %" Pd
+          " characters",
+          best_len);
+  }
+  char cursor[64];
+  memmove(cursor, best, best_len);
+  cursor[best_len] = '\0';
+  state_->SetCursor(cursor);
+}
+
 Obfuscator::Obfuscator(Thread* thread, const String& private_key)
     : state_(nullptr) {
   auto isolate_group = thread->isolate_group();
@@ -3745,6 +4217,24 @@ Obfuscator::Obfuscator(Thread* thread, const String& private_key)
     // We are just starting the obfuscation. Initialize the renaming map.
     // Note: InitializeRenamingMap uses state_.
     InitializeRenamingMap();
+
+    // SELFHOST: and, if asked, seed it from a previously saved map.
+    //
+    // This branch is the only moment at which the obfuscation state comes
+    // into existence, and it is reached from kernel bootstrap -- measured:
+    //   InitializeRenamingMap <- Obfuscator::Obfuscator
+    //     <- BootstrapFromKernelSingleProgram <- Object::Init
+    //     <- CreateIsolate <- Dart_CreateIsolateGroupFromKernel <- bin::main
+    // so an embedder-side API could only ever merge into a map that is
+    // already renaming. Hence a VM flag, and hence here.
+    //
+    // Seeding AFTER InitializeRenamingMap rather than instead of it is
+    // deliberate: a saved map already carries those identity renames (they
+    // were serialized with it), so the two agree; and a hand-made map that
+    // omits them still gets the keywords protected.
+    if (FLAG_load_obfuscation_map != nullptr) {
+      LoadObfuscationMapFromFile(FLAG_load_obfuscation_map);
+    }
   }
 }
 
@@ -3893,6 +4383,24 @@ void Obfuscator::ObfuscationState::SaveState() {
   saved_state_.SetAt(kSavedStateNameIndex, String::Handle(String::New(name_)));
   saved_state_.SetAt(kSavedStateRenamesIndex, renames_.Release());
   thread_->isolate_group()->object_store()->set_obfuscation_map(saved_state_);
+}
+
+// SELFHOST: see the declarations in precompiler.h.
+void Obfuscator::ObfuscationState::InsertLoadedRename(const String& original,
+                                                      const String& renamed) {
+  // Not a style assertion: ObfuscationMapTraits::IsMatch compares by pointer
+  // identity, so only canonical Symbols can ever be found again by RenameImpl
+  // or by NewAtomicRename's identity check.
+  ASSERT(original.IsSymbol());
+  ASSERT(renamed.IsSymbol());
+  renames_.UpdateOrInsert(original, renamed);
+}
+
+void Obfuscator::ObfuscationState::SetCursor(const char* cursor) {
+  const intptr_t len = strlen(cursor);
+  RELEASE_ASSERT(len < static_cast<intptr_t>(sizeof(name_)));
+  memset(name_, 0, sizeof(name_));
+  memmove(name_, cursor, len);
 }
 
 void Obfuscator::ObfuscationState::PreventRenaming(const char* name) {

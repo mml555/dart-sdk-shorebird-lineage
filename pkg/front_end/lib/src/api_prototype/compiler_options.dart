@@ -96,6 +96,28 @@ class CompilerOptions {
   /// restrictions.
   Uri? dynamicInterfaceSpecificationUri;
 
+  /// Import URI of a library whose private namespace the compiled sources may
+  /// resolve names in.
+  ///
+  /// Dart privacy is library-scoped, so code compiled as its own library cannot
+  /// name another library's private members however it is spelled. The front end
+  /// already has the mechanism to lift that -- `resolveInLibrary`, used for
+  /// debugger expression evaluation, where an expression typed at a breakpoint
+  /// must see the private namespace of the library it is evaluated in. Normal
+  /// compilation hard-codes it off.
+  ///
+  /// Setting this makes that mechanism available outside the debugger: every
+  /// source compilation unit also resolves names in the named library's own
+  /// namespace. The named library must be available to the compile, which in
+  /// practice means it arrives via [additionalDills].
+  ///
+  /// This exists for generated code that must behave as if it belonged to a
+  /// library it is not textually in -- a hot-patch replacement body compiled
+  /// against an already-shipped application. It is deliberately opt-in and off
+  /// by default, because it widens name resolution and should never be enabled
+  /// for an ordinary compile.
+  Uri? resolvePrivateNamesInLibrary;
+
   /// The declared variables for use by configurable imports and constant
   /// evaluation.
   Map<String, String>? declaredVariables;
@@ -318,6 +340,12 @@ class CompilerOptions {
     if (sdkSummary != other.sdkSummary) return false;
     if (dynamicInterfaceSpecificationUri !=
         other.dynamicInterfaceSpecificationUri) {
+      return false;
+    }
+    // Two option sets differing only here are NOT equivalent: this one changes
+    // which names resolve, so reusing a component compiled without it would
+    // silently produce different code.
+    if (resolvePrivateNamesInLibrary != other.resolvePrivateNamesInLibrary) {
       return false;
     }
     if (!equalMaps(declaredVariables, other.declaredVariables)) return false;
