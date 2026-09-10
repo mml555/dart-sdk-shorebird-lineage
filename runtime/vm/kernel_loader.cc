@@ -5,6 +5,8 @@
 
 #include "vm/kernel_loader.h"
 
+#include "vm/maot_registry.h"
+
 #include <string.h>
 
 #include <memory>
@@ -215,6 +217,7 @@ KernelLoader::KernelLoader(Program* program,
       inferred_type_metadata_helper_(&helper_,
                                      &constant_reader_,
                                      &type_translator_),
+      maot_declaration_id_metadata_helper_(&helper_),
       static_field_value_(Object::Handle(Z)),
       name_index_handle_(Smi::Handle(Z)),
       expression_evaluation_library_(Library::Handle(Z)) {
@@ -478,6 +481,7 @@ KernelLoader::KernelLoader(const KernelProgramInfo& kernel_program_info,
       inferred_type_metadata_helper_(&helper_,
                                      &constant_reader_,
                                      &type_translator_),
+      maot_declaration_id_metadata_helper_(&helper_),
       static_field_value_(Object::Handle(Z)),
       name_index_handle_(Smi::Handle(Z)),
       expression_evaluation_library_(Library::Handle(Z)) {
@@ -1849,6 +1853,31 @@ void KernelLoader::LoadProcedure(const Library& library,
     H.SetExpressionEvaluationFunction(function);
   }
   function.set_kernel_offset(procedure_offset);
+
+  // MUTABLE-AOT (#66): bind the #65 declaration id to THIS Function, here,
+  // where the Kernel node offset and the runtime Function are both in hand.
+  // This is the only place the association is made. Reconstructing it later --
+  // by name, by address, or by a kernel offset the precompiled runtime does
+  // not carry -- is the architecture this program exists to eliminate.
+  {
+    const MaotDeclarationIdMetadata maot_md =
+        maot_declaration_id_metadata_helper_.GetMaotDeclarationId(
+            // ABSOLUTE component offset. `procedure_offset` is relative to the
+            // library (correction_offset_ == library_kernel_offset_), while
+            // metadata mappings are keyed by absolute offsets -- looking up
+            // with the relative one silently finds nothing.
+            procedure_offset + correction_offset_);
+    if (FLAG_maot_trace_registration && !maot_md.has_value) {
+      OS::PrintErr("[maot] MISS abs=%" Pd " name=%s\n",
+                   procedure_offset + correction_offset_, name.ToCString());
+    }
+    if (maot_md.has_value) {
+      const String& maot_id = H.DartSymbolPlain(maot_md.declaration_id);
+      const String& maot_abi = H.DartSymbolPlain(maot_md.abi_canonical);
+      MaotRegistry::Register(thread_, maot_id, maot_md.selected, function,
+                             maot_abi);
+    }
+  }
   function.set_is_extension_member(is_extension_member);
   function.set_is_extension_type_member(is_extension_type_member);
   if ((library.is_dart_scheme() &&

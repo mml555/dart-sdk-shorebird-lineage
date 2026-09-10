@@ -7,6 +7,8 @@
 
 #include "vm/dart.h"
 
+#include "vm/maot_registry.h"
+
 #include "platform/unwinding_records.h"
 
 #include "vm/app_snapshot.h"
@@ -1015,6 +1017,15 @@ ErrorPtr Dart::InitializeIsolate(Thread* T,
   }
 
   I->set_init_callback_data(isolate_data);
+
+  // MUTABLE-AOT (#66): test-only introspection. Runs here because the isolate
+  // group's object store -- and therefore the registry root restored from the
+  // snapshot -- is live by this point. This is the seam that lets the gate
+  // prove the binding survived into the PRECOMPILED RUNTIME, rather than
+  // inferring survival from the fact that Arrays normally serialize.
+  if (FLAG_maot_dump_registry != nullptr) {
+    MaotRegistry::DumpToFile(T, FLAG_maot_dump_registry);
+  }
 
 #if !defined(PRODUCT)
   if (Isolate::IsSystemIsolate(I)) {

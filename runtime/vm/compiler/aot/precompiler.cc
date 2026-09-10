@@ -3,6 +3,7 @@
 // BSD-style license that can be found in the LICENSE file.
 
 #include "vm/compiler/aot/precompiler.h"
+#include "vm/maot_registry.h"
 
 #include <memory>
 
@@ -808,6 +809,14 @@ void Precompiler::DoCompileAll() {
     THR_Print(" %" Pd " libraries,", dropped_library_count_);
     THR_Print(" %" Pd " constants arrays entries.\n",
               dropped_constants_arrays_entries_count_);
+  }
+
+  // MUTABLE-AOT (#66): dump the registry as the PRECOMPILER sees it, before
+  // anything is serialized. Paired with the runtime dump, this separates "the
+  // binding was wrong when we made it" from "the binding was lost in the
+  // snapshot round trip" -- two very different defects.
+  if (FLAG_maot_dump_registry_precompile != nullptr) {
+    MaotRegistry::DumpToFile(T, FLAG_maot_dump_registry_precompile);
   }
 }
 

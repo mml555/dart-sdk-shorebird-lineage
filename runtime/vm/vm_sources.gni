@@ -205,6 +205,8 @@ vm_sources = [
   "object_reload.cc",
   "object_service.cc",
   "object_set.h",
+  "maot_registry.cc",
+  "maot_registry.h",
   "object_store.cc",
   "object_store.h",
   "os.cc",

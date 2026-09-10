@@ -66,6 +66,32 @@ class MaotAbiDescriptor {
   /// type arguments to be passed.
   final bool ownerIsGeneric;
 
+  /// Reconstructs a descriptor from [canonicalForm]. Total by construction:
+  /// the canonical form is the serialized representation, so a value that
+  /// cannot be parsed is a corrupt payload rather than a shape to guess at.
+  factory MaotAbiDescriptor.parse(String canonical) {
+    final parts = canonical.split(';');
+    if (parts.length != 7) {
+      throw FormatException('not a MAOT ABI canonical form: $canonical');
+    }
+    final positional = parts[1].substring(1).split('/');
+    List<String> list(String field) {
+      final body = field.substring(1);
+      return body.isEmpty ? const <String>[] : body.split('|');
+    }
+
+    return MaotAbiDescriptor(
+      memberKind: int.parse(parts[0].substring(1)),
+      requiredPositionalCount: int.parse(positional[0]),
+      totalPositionalCount: int.parse(positional[1]),
+      namedParameters: list(parts[2]),
+      requiredNamedParameters: list(parts[3]),
+      typeParameterCount: int.parse(parts[4].substring(1)),
+      hasReceiver: parts[5] == 'recv',
+      ownerIsGeneric: parts[6] == 'ogen',
+    );
+  }
+
   const MaotAbiDescriptor({
     required this.memberKind,
     required this.requiredPositionalCount,
@@ -133,6 +159,11 @@ class MaotDeclarationIdMetadataRepository
   /// less than the program.
   final List<String> refusals = [];
 
+  // The payload is three fields: the id, the selection flag, and the ABI in
+  // its CANONICAL STRING form. The canonical form is rendered once, here,
+  // where the descriptor is defined -- reconstructing it on the VM side would
+  // duplicate the formatting and let the two drift, which is precisely how a
+  // compatibility check starts comparing two different notions of "same ABI".
   @override
   void writeToBinary(
     MaotDeclarationIdMetadata metadata,
@@ -141,52 +172,18 @@ class MaotDeclarationIdMetadataRepository
   ) {
     sink.writeStringReference(metadata.declarationId);
     sink.writeByte(metadata.selected ? 1 : 0);
-    final abi = metadata.abi;
-    sink.writeUInt30(abi.memberKind);
-    sink.writeUInt30(abi.requiredPositionalCount);
-    sink.writeUInt30(abi.totalPositionalCount);
-    sink.writeUInt30(abi.namedParameters.length);
-    for (final name in abi.namedParameters) {
-      sink.writeStringReference(name);
-    }
-    sink.writeUInt30(abi.requiredNamedParameters.length);
-    for (final name in abi.requiredNamedParameters) {
-      sink.writeStringReference(name);
-    }
-    sink.writeUInt30(abi.typeParameterCount);
-    sink.writeByte(abi.hasReceiver ? 1 : 0);
-    sink.writeByte(abi.ownerIsGeneric ? 1 : 0);
+    sink.writeStringReference(metadata.abi.canonicalForm);
   }
 
   @override
   MaotDeclarationIdMetadata readFromBinary(Node node, BinarySource source) {
     final declarationId = source.readStringReference();
     final selected = source.readByte() == 1;
-    final memberKind = source.readUInt30();
-    final requiredPositional = source.readUInt30();
-    final totalPositional = source.readUInt30();
-    final named = <String>[
-      for (int i = source.readUInt30(); i > 0; i--) source.readStringReference(),
-    ];
-    final requiredNamed = <String>[
-      for (int i = source.readUInt30(); i > 0; i--) source.readStringReference(),
-    ];
-    final typeParameterCount = source.readUInt30();
-    final hasReceiver = source.readByte() == 1;
-    final ownerIsGeneric = source.readByte() == 1;
+    final canonical = source.readStringReference();
     return MaotDeclarationIdMetadata(
       declarationId: declarationId,
       selected: selected,
-      abi: MaotAbiDescriptor(
-        memberKind: memberKind,
-        requiredPositionalCount: requiredPositional,
-        totalPositionalCount: totalPositional,
-        namedParameters: named,
-        requiredNamedParameters: requiredNamed,
-        typeParameterCount: typeParameterCount,
-        hasReceiver: hasReceiver,
-        ownerIsGeneric: ownerIsGeneric,
-      ),
+      abi: MaotAbiDescriptor.parse(canonical),
     );
   }
 
@@ -196,10 +193,45 @@ class MaotDeclarationIdMetadataRepository
   /// Runs before tree shaking. A member the identity scheme refuses is
   /// recorded in [refusals] and given no metadata at all — it must not receive
   /// a guessed id, and it must not silently look like an unselected member.
+  /// Collects the ids of members [select] accepts, on the UNSHAKEN component.
+  ///
+  /// Split from [index] deliberately. Selection must be decided before tree
+  /// shaking, but metadata has to be attached to the nodes that actually reach
+  /// the binary: the transforms REPLACE member nodes, and metadata keyed on a
+  /// replaced node is silently dropped. Measured, not assumed -- the first
+  /// version indexed pre-shaking and only the one untransformed member kept
+  /// its entry.
+  static Set<String> collectSelected(
+    Component component,
+    MaotIdentity identity,
+    bool Function(Member) select, {
+    bool includeSdk = false,
+  }) {
+    final selected = <String>{};
+    for (final library in component.libraries) {
+      if (!includeSdk && library.importUri.isScheme('dart')) continue;
+      void visit(Member member) {
+        if (!select(member)) return;
+        try {
+          final id = identity.memberId(member);
+          if (id.addressable) selected.add(id.id);
+        } on MaotIdentityError {
+          // Refusals are reported by index(); nothing is guessed here.
+        }
+      }
+
+      library.members.forEach(visit);
+      for (final cls in library.classes) {
+        cls.members.forEach(visit);
+      }
+    }
+    return selected;
+  }
+
   void index(
     Component component,
     MaotIdentity identity, {
-    required bool Function(Member) select,
+    required Set<String> selectedIds,
     bool includeSdk = false,
   }) {
     for (final library in component.libraries) {
@@ -219,7 +251,7 @@ class MaotDeclarationIdMetadataRepository
         }
         mapping[member] = MaotDeclarationIdMetadata(
           declarationId: id.id,
-          selected: select(member),
+          selected: selectedIds.contains(id.id),
           abi: describeAbi(member, id),
         );
       }

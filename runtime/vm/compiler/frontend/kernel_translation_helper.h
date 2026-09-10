@@ -1115,6 +1115,33 @@ struct ProcedureAttributesMetadata {
 };
 
 // Helper class which provides access to direct call metadata.
+// Mutable-AOT (#66): the #65 declaration identity, carried from Kernel.
+//
+// This is how the registry is TOLD which Function belongs to which logical
+// declaration. It is read at the kernel-load join point, where the Kernel node
+// and the runtime Function coexist -- never re-derived afterward from a name,
+// an address, or a kernel offset that the precompiled runtime does not have.
+struct MaotDeclarationIdMetadata {
+  StringIndex declaration_id;
+  StringIndex abi_canonical;
+  bool selected = false;
+  bool has_value = false;
+};
+
+class MaotDeclarationIdMetadataHelper : public MetadataHelper {
+ public:
+  static const char* tag() { return "vm.maot-declaration-id"; }
+
+  explicit MaotDeclarationIdMetadataHelper(KernelReaderHelper* helper);
+
+  MaotDeclarationIdMetadata GetMaotDeclarationId(intptr_t node_offset);
+
+ private:
+  bool ReadMetadata(intptr_t node_offset, MaotDeclarationIdMetadata* metadata);
+
+  DISALLOW_COPY_AND_ASSIGN(MaotDeclarationIdMetadataHelper);
+};
+
 class ProcedureAttributesMetadataHelper : public MetadataHelper {
  public:
   static const char* tag() { return "vm.procedure-attributes.metadata"; }
@@ -1390,6 +1417,7 @@ class KernelReaderHelper {
   friend class LibraryDependencyHelper;
   friend class LibraryHelper;
   friend class MetadataHelper;
+  friend class MaotDeclarationIdMetadataHelper;
   friend class ProcedureAttributesMetadataHelper;
   friend class ProcedureHelper;
   friend class SimpleExpressionConverter;

@@ -1958,6 +1958,37 @@ ProcedureAttributesMetadataHelper::GetProcedureAttributes(
   return metadata;
 }
 
+MaotDeclarationIdMetadataHelper::MaotDeclarationIdMetadataHelper(
+    KernelReaderHelper* helper)
+    : MetadataHelper(helper, tag(), /* precompiler_only = */ false) {}
+
+bool MaotDeclarationIdMetadataHelper::ReadMetadata(
+    intptr_t node_offset,
+    MaotDeclarationIdMetadata* metadata) {
+  intptr_t md_offset = GetNextMetadataPayloadOffset(node_offset);
+  if (md_offset < 0) {
+    return false;
+  }
+
+  AlternativeReadingScopeWithNewData alt(&helper_->reader_,
+                                         &H.metadata_payloads(), md_offset);
+
+  // Field order must match writeToBinary in
+  // pkg/vm/lib/metadata/maot_declaration_id.dart.
+  metadata->declaration_id = helper_->ReadStringReference();
+  metadata->selected = helper_->ReadByte() == 1;
+  metadata->abi_canonical = helper_->ReadStringReference();
+  metadata->has_value = true;
+  return true;
+}
+
+MaotDeclarationIdMetadata
+MaotDeclarationIdMetadataHelper::GetMaotDeclarationId(intptr_t node_offset) {
+  MaotDeclarationIdMetadata metadata;
+  ReadMetadata(node_offset, &metadata);
+  return metadata;
+}
+
 ObfuscationProhibitionsMetadataHelper::ObfuscationProhibitionsMetadataHelper(
     KernelReaderHelper* helper)
     : MetadataHelper(helper, tag(), /* precompiler_only = */ true) {}

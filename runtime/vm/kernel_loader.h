@@ -382,6 +382,7 @@ class KernelLoader : public ValueObject {
   ConstantReader constant_reader_;
   TypeTranslator type_translator_;
   InferredTypeMetadataHelper inferred_type_metadata_helper_;
+  MaotDeclarationIdMetadataHelper maot_declaration_id_metadata_helper_;
 
   Object& static_field_value_;
 

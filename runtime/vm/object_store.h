@@ -287,6 +287,14 @@ class ObjectPointerVisitor;
   RW(Code, unreachable_tts_stub)                                               \
   RW(Array, ffi_callback_functions)                                            \
   RW(Code, resume_stub)                                                        \
+  /* Mutable-AOT (#66). PLACEMENT IS LOAD-BEARING, TWICE OVER.            */ \
+  /* It must sit BEFORE slow_tts_stub, because to_snapshot(kFullAOT) stops */ \
+  /* there and anything after it is simply not written to an AOT snapshot  */ \
+  /* -- the registry survived the build and vanished from the runtime.     */ \
+  /* It must sit AFTER the last field in runtime_offsets_extracted.h, or   */ \
+  /* every following offset shifts and CheckOffsets aborts gen_snapshot.   */ \
+  RW(GrowableObjectArray, maot_registry)                                       \
+  RW(String, maot_namespace)                                                   \
   RW(Code, slow_tts_stub)                                                      \
   /* Roots for JIT/AOT snapshots are up until here (see to_snapshot() below)*/ \
   RW(Code, await_stub)                                                         \
