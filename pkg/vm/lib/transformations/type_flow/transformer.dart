@@ -7,6 +7,9 @@ library;
 
 import 'dart:core' hide Type;
 
+import 'package:kernel/maot_identity.dart';
+import '../../metadata/maot_declaration_id.dart';
+
 import 'package:front_end/src/api_prototype/static_weak_references.dart'
     show StaticWeakReferences;
 import 'package:front_end/src/api_prototype/record_use.dart' as record_use;
@@ -48,6 +51,34 @@ const bool kDumpClassHierarchy = const bool.fromEnvironment(
 
 /// Whole-program type flow analysis and transformation.
 /// Assumes strong mode and closed world.
+/// Mutable-AOT selection (#66): a declaration is mutable when the developer
+/// says so with `@pragma('maot:mutable')`.
+///
+/// Explicit on purpose. An implicit rule -- "everything public", "everything
+/// reachable" -- would make the mutable set a consequence of unrelated edits,
+/// and #66 requires that an unselected declaration can never become mutable by
+/// accident nor a selected one silently vanish.
+bool _isMaotMutable(Member member) {
+  for (final annotation in member.annotations) {
+    if (annotation is ConstantExpression) {
+      final constant = annotation.constant;
+      if (constant is InstanceConstant) {
+        final name = constant.classNode.name;
+        if (name == 'pragma') {
+          for (final entry in constant.fieldValues.entries) {
+            final value = entry.value;
+            if (value is StringConstant && value.value == 'maot:mutable') {
+              return true;
+            }
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+
 Component transformComponent(
   Target target,
   CoreTypes coreTypes,
@@ -151,6 +182,19 @@ Component transformComponent(
 
   final transformsStopWatch = new Stopwatch()..start();
 
+  // MUTABLE-AOT (#66): assign declaration identity BEFORE the tree shaker
+  // runs. "Whatever survived AOT" is not a selection contract -- a declaration
+  // the developer marked mutable must be registered even if nothing in the
+  // release reaches it, because #68 needs dead-but-mutable declarations to
+  // stay representable. Selection is therefore decided here, on the unshaken
+  // component, and carried per declaration.
+  final maotIdentity = MaotIdentity();
+  final maotSelectedIds = MaotDeclarationIdMetadataRepository.collectSelected(
+    component,
+    maotIdentity,
+    _isMaotMutable,
+  );
+
   final (:fieldMorpher, treeShakeConstant: treeShakeConstant) = new TreeShaker(
     component,
     typeFlowAnalysis,
@@ -182,6 +226,29 @@ Component transformComponent(
   final unboxingInfo = new UnboxingInfoManager(typeFlowAnalysis)
     ..analyzeComponent(component, typeFlowAnalysis, tableSelectorAssigner);
 
+  // Attach identity metadata HERE, immediately before AnnotateKernel, which is
+  // where every other repository is populated. Placing it earlier is wrong and
+  // was measured to be wrong: SignatureShaker rewrites members after the
+  // devirtualization pass, so metadata attached before it is keyed on nodes
+  // whose offsets then move -- the VM read a valid payload for the wrong
+  // Function, which is precisely the id/Function mismatch #66 must refuse.
+  //
+  // Selection was decided before tree shaking and travels as a set of ids, so
+  // moving the ATTACHMENT later does not weaken the selection contract.
+  final maotMetadata = MaotDeclarationIdMetadataRepository();
+  maotMetadata.index(component, maotIdentity, selectedIds: maotSelectedIds);
+  component.addMetadataRepository(maotMetadata);
+  if (const bool.fromEnvironment('maot.trace')) {
+    // ignore: avoid_print
+    print('[maot-dart] selected=${maotSelectedIds.length} '
+        'mapped=${maotMetadata.mapping.length} '
+        'refusals=${maotMetadata.refusals.length}');
+    for (final e in maotMetadata.mapping.entries.take(8)) {
+      // ignore: avoid_print
+      print('[maot-dart]   ${e.value.declarationId} selected=${e.value.selected}');
+    }
+  }
+
   new AnnotateKernel(
     component,
     typeFlowAnalysis,
@@ -210,7 +277,7 @@ Component transformComponent(
 // into constructors. This makes fields self-contained and
 // simplifies tree-shaking of fields.
 class MoveFieldInitializers {
-  void transformComponent(Component component) {
+void transformComponent(Component component) {
     for (Library library in component.libraries) {
       for (Class cls in library.classes) {
         transformClass(cls);

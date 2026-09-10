@@ -214,6 +214,15 @@ class ObjectPointerVisitor;
   RW(GrowableObjectArray, megamorphic_cache_table)                             \
   RW(GrowableObjectArray, ffi_callback_code)                                   \
   ARW_AR(Class, typed_data_class)                                              \
+  /* Mutable-AOT (#66). PLACEMENT IS LOAD-BEARING.                        */ \
+  /* to_snapshot(kFullAOT) ends at ffi_callback_functions_ (3.13.7; it was */ \
+  /* slow_tts_stub_ in 3.12.2), and anything after it is simply not        */ \
+  /* written to an AOT snapshot -- the registry survived the build and     */ \
+  /* vanished from the runtime. So these sit BEFORE ffi_callback_functions.*/ \
+  /* The 3.12.2 constraint about runtime_offsets_extracted.h no longer     */ \
+  /* applies: 3.13.7 exports no ObjectStore field offsets.                 */ \
+  RW(GrowableObjectArray, maot_registry)                                       \
+  RW(String, maot_namespace)                                                   \
   RW(Array, ffi_callback_functions)                                            \
   /* Roots for JIT/AOT snapshots are up until here (see to_snapshot() below)*/ \
   RW(Array, dispatch_table_code_entries)                                       \
