@@ -21,6 +21,26 @@ DEFINE_FLAG(charp,
             "serialization (diagnostic).");
 
 DEFINE_FLAG(bool,
+            maot_disable_constructor_seam,
+            false,
+            "FALSIFICATION CONTROL. Skip binding at the constructor creation "
+            "seam, so a selected constructor silently has no slot while every "
+            "ordinary procedure still succeeds.");
+
+DEFINE_FLAG(bool,
+            maot_materialize_unselected,
+            false,
+            "FALSIFICATION CONTROL. Let unselected declarations into the "
+            "final registry, which must never happen: a slot is an "
+            "authoritative promise of mutability.");
+
+DEFINE_FLAG(charp,
+            maot_selftest,
+            nullptr,
+            "Run the registry state self-test and write structured results "
+            "to this path (test-only).");
+
+DEFINE_FLAG(bool,
             maot_disable_seeding,
             false,
             "FALSIFICATION CONTROL. Skip feeding selected declarations into "
@@ -112,9 +132,23 @@ void MaotRegistry::EntryAt(Thread* thread,
 }
 
 void MaotRegistry::Clear(Thread* thread) {
-  const auto& storage =
-      GrowableObjectArray::Handle(thread->zone(), EnsureStorage(thread));
-  storage.SetLength(0);
+  // SetLength(0) is NOT enough here, and the difference is not cosmetic.
+  //
+  // A GrowableObjectArray's backing Array keeps its full capacity, and every
+  // slot past the new length still holds the old pointer. The GC and the
+  // snapshot serializer both walk the BACKING ARRAY, not the logical length,
+  // so a Function cleared this way stays reachable from an ObjectStore root.
+  // In the precompiler that resurrects Functions whose owner Class the drop
+  // phase has already removed from the class table, and the serializer then
+  // aborts with "Unexpected object (Class with illegal cid, full-aot)" --
+  // which is exactly how this was found, on a program that selected nothing
+  // at all.
+  //
+  // Replacing the storage outright is the only form that leaves no slot
+  // holding anything: it is the array itself that has to go, not its length.
+  thread->isolate_group()->object_store()->set_maot_registry(
+      GrowableObjectArray::Handle(thread->zone(),
+                                  GrowableObjectArray::New(Heap::kOld)));
 }
 
 intptr_t MaotRegistry::IndexOf(Thread* thread, const String& declaration_id) {
@@ -131,17 +165,14 @@ intptr_t MaotRegistry::IndexOf(Thread* thread, const String& declaration_id) {
   return -1;
 }
 
-void MaotRegistry::Register(Thread* thread,
+bool MaotRegistry::Register(Thread* thread,
                             const String& declaration_id,
                             bool selected,
                             const Function& implementation,
                             const String& abi_descriptor) {
   Zone* zone = thread->zone();
   if (IndexOf(thread, declaration_id) >= 0) {
-    // Two runtime entities claiming one identity. A later patch would bind to
-    // whichever won, so this is fatal rather than a warning.
-    FATAL("MaotRegistry: duplicate declaration id '%s'",
-          declaration_id.ToCString());
+    return false;  // duplicate: the caller decides how loudly to fail
   }
   if (FLAG_maot_trace_registration) {
     OS::PrintErr("[maot] register id=%s selected=%d fn=%s\n",
@@ -159,6 +190,7 @@ void MaotRegistry::Register(Thread* thread,
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // staged version
   storage.Add(Object::null_object(), Heap::kOld);            // staged impl
   storage.Add(Object::null_object(), Heap::kOld);            // staged abi
+  return true;
 }
 
 void MaotRegistry::SetNamespace(Thread* thread,
@@ -210,11 +242,15 @@ bool MaotRegistry::StageReplacement(Thread* thread,
                                     Kind kind,
                                     intptr_t version,
                                     const Function& implementation,
-                                    const String& abi_descriptor) {
+                                    const String& abi_descriptor,
+                                    const String& patch_namespace) {
   const intptr_t entry = IndexOf(thread, declaration_id);
   if (entry < 0) return false;  // missing id is refused, never created
 
   Zone* zone = thread->zone();
+  // The release this patch was built against must be THIS release.
+  const auto& ns = String::Handle(zone, GetNamespace(thread));
+  if (ns.IsNull() || !ns.Equals(patch_namespace)) return false;
   // ABI compatibility is decided BEFORE anything changes. An incompatible
   // replacement must never leave the entry half-updated.
   const auto& current_abi =
@@ -281,6 +317,201 @@ bool MaotRegistry::CommitStagedForTesting(Thread* thread,
   SetFieldAt(thread, entry, kStagedImpl, Object::null_object());
   SetFieldAt(thread, entry, kStagedAbi, Object::null_object());
   return true;
+}
+
+
+// ---------------------------------------------------------------------------
+// Test-only self-test. #66 needs the STATE primitive proven -- staging,
+// version, ABI, namespace, duplicate and missing semantics -- not execution
+// of replacement code. #67 owns execution; #71 owns real transactions.
+//
+// Every arm records what it expected and what it observed, so the Shorebird
+// gate derives the verdict from the observations rather than from a summary
+// this file writes about itself.
+// ---------------------------------------------------------------------------
+void MaotRegistry::RunSelfTest(Thread* thread, const char* path) {
+  Zone* zone = thread->zone();
+  JSONWriter w;
+  w.OpenObject();
+  w.PrintProperty("schema", "maot.registry.selftest/1");
+
+  const auto& ns = String::Handle(zone, GetNamespace(thread));
+  w.PrintProperty("namespace_identity",
+                  ns.IsNull() ? "<absent>" : ns.ToCString());
+
+  const intptr_t n = Length(thread);
+  w.PrintProperty64("entry_count", n);
+
+  // Two entries with the SAME ABI are needed for a positive staging arm, and
+  // one with a DIFFERENT ABI for the mismatch arm. Pick them by inspection
+  // rather than by hard-coding names.
+  auto& id_a = String::Handle(zone);
+  auto& abi_a = String::Handle(zone);
+  auto& fn_a = Function::Handle(zone);
+  auto& id_b = String::Handle(zone);
+  auto& abi_b = String::Handle(zone);
+  auto& fn_b = Function::Handle(zone);
+  auto& id_x = String::Handle(zone);
+  auto& abi_x = String::Handle(zone);
+  auto& fn_x = Function::Handle(zone);
+  bool sel = false;
+  bool have_pair = false, have_mismatch = false;
+
+  for (intptr_t i = 0; i < n && !have_pair; i++) {
+    EntryAt(thread, i, &id_a, &sel, &fn_a, &abi_a);
+    for (intptr_t j = 0; j < n; j++) {
+      if (i == j) continue;
+      EntryAt(thread, j, &id_b, &sel, &fn_b, &abi_b);
+      if (abi_a.Equals(abi_b)) { have_pair = true; break; }
+    }
+    if (!have_pair) EntryAt(thread, i, &id_a, &sel, &fn_a, &abi_a);
+  }
+  for (intptr_t i = 0; i < n && have_pair && !have_mismatch; i++) {
+    EntryAt(thread, i, &id_x, &sel, &fn_x, &abi_x);
+    if (!abi_x.Equals(abi_a)) have_mismatch = true;
+  }
+
+  w.PrintPropertyBool("found_same_abi_pair", have_pair);
+  w.PrintPropertyBool("found_different_abi_entry", have_mismatch);
+
+  auto arm = [&](const char* id, const char* expected, bool ok,
+                 const char* observed) {
+    w.OpenObject();
+    w.PrintProperty("id", id);
+    w.PrintProperty("expected", expected);
+    w.PrintProperty("observed", observed);
+    w.PrintProperty("result", ok ? "pass" : "FAIL");
+    w.CloseObject();
+  };
+
+  w.OpenArray("arms");
+
+  Kind kind = kAot;
+  intptr_t version = 0;
+  auto& impl = Function::Handle(zone);
+  auto& abi = String::Handle(zone);
+
+  if (have_pair) {
+    // S01 -- the initial descriptor is the release implementation.
+    bool found = LookupCurrent(thread, id_a, &kind, &version, &impl, &abi);
+    const bool s01 = found && kind == kAot && version == 1 && !impl.IsNull();
+    arm("S01", "current is AOT v1 with an implementation", s01,
+        s01 ? "AOT v1 present" : "not as expected");
+
+    // S02 -- staging must not be visible through the current lookup.
+    const bool staged_ok = StageReplacement(thread, id_a, kPatchCode, 2, fn_b,
+                                            abi_a, ns);
+    LookupCurrent(thread, id_a, &kind, &version, &impl, &abi);
+    const bool s02 = staged_ok && kind == kAot && version == 1;
+    arm("S02", "stage PATCH_CODE v2; current still AOT v1", s02,
+        staged_ok ? (s02 ? "staged, current unchanged"
+                         : "staged but current CHANGED")
+                  : "staging refused");
+    arm("S03", "HasStaged reports the pending replacement",
+        HasStaged(thread, id_a), HasStaged(thread, id_a) ? "true" : "false");
+
+    // V01 -- a replacement must advance the version.
+    const bool v01 = !StageReplacement(thread, id_a, kPatchCode, 1, fn_b,
+                                       abi_a, ns);
+    arm("V01", "staging at or below the current version is refused", v01,
+        v01 ? "refused" : "ACCEPTED");
+
+    // A01 -- an incompatible ABI is refused BEFORE anything changes.
+    if (have_mismatch) {
+      const bool a01 = !StageReplacement(thread, id_a, kPatchCode, 3, fn_x,
+                                         abi_x, ns);
+      LookupCurrent(thread, id_a, &kind, &version, &impl, &abi);
+      arm("A01", "ABI mismatch refused, current untouched",
+          a01 && kind == kAot && version == 1,
+          a01 ? "refused" : "ACCEPTED");
+    }
+
+    // N01 -- a patch from another release is refused.
+    const auto& wrong_ns =
+        String::Handle(zone, String::New("0000000000000000", Heap::kOld));
+    const bool n01 =
+        !StageReplacement(thread, id_a, kPatchCode, 3, fn_b, abi_a, wrong_ns);
+    arm("N01", "wrong release namespace refused", n01,
+        n01 ? "refused" : "ACCEPTED");
+
+    // S04 -- the explicit test-only mutation makes the staged one current.
+    const bool committed = CommitStagedForTesting(thread, id_a);
+    LookupCurrent(thread, id_a, &kind, &version, &impl, &abi);
+    const bool s04 = committed && kind == kPatchCode && version == 2;
+    arm("S04", "commit promotes staged to current", s04,
+        committed ? (s04 ? "current is PATCH_CODE v2" : "commit did not apply")
+                  : "commit refused");
+
+    // V02 -- nothing staged means nothing to commit.
+    const bool v02 = !CommitStagedForTesting(thread, id_a);
+    arm("V02", "commit with nothing staged is refused", v02,
+        v02 ? "refused" : "ACCEPTED");
+
+    // V03 -- a version bump that changes no implementation is not a
+    // replacement.
+    LookupCurrent(thread, id_a, &kind, &version, &impl, &abi);
+    StageReplacement(thread, id_a, kPatchCode, version + 1, impl, abi, ns);
+    const bool v03 = !CommitStagedForTesting(thread, id_a);
+    arm("V03", "version bump with the same implementation is refused", v03,
+        v03 ? "refused" : "ACCEPTED");
+  }
+
+  // M01/M02 -- an unknown declaration is refused, never implicitly created.
+  const auto& unknown =
+      String::Handle(zone, String::New("lib:package:none/x.dart::fn:absent",
+                                       Heap::kOld));
+  const bool m01 = !LookupCurrent(thread, unknown, nullptr, nullptr, nullptr,
+                                  nullptr);
+  arm("M01", "lookup of an unknown id is refused", m01,
+      m01 ? "refused" : "FOUND");
+  const bool m02 =
+      !StageReplacement(thread, unknown, kPatchCode, 2, fn_a, abi_a, ns);
+  const bool m02b = IndexOf(thread, unknown) < 0;
+  arm("M02", "staging an unknown id refuses and creates nothing",
+      m02 && m02b, (m02 && m02b) ? "refused, not created" : "created or accepted");
+
+  // D01 -- a duplicate registration is refused.
+  const bool d01 = have_pair ? !Register(thread, id_a, true, fn_a, abi_a) : false;
+  arm("D01", "duplicate registration is refused", d01,
+      d01 ? "refused" : "ACCEPTED");
+
+  w.CloseArray();
+
+  // --- measurements. Diagnostic only; no threshold is compared. ---
+  w.OpenObject("measurements");
+  const auto& storage =
+      GrowableObjectArray::Handle(zone, EnsureStorage(thread));
+  const intptr_t slots = storage.Length();
+  w.PrintProperty64("entries", n);
+  w.PrintProperty64("array_slots", slots);
+  w.PrintProperty64("slots_per_entry", kEntrySize);
+  w.PrintProperty64("registry_bytes_approx", slots * kWordSize);
+  w.PrintProperty64("bytes_per_entry_approx",
+                    n > 0 ? (slots * kWordSize) / n : 0);
+  const int64_t t0 = OS::GetCurrentTimeMicros();
+  const intptr_t kIters = 10000;
+  intptr_t sink = 0;
+  for (intptr_t i = 0; i < kIters && n > 0; i++) {
+    sink += IndexOf(thread, id_a) >= 0 ? 1 : 0;
+  }
+  const int64_t t1 = OS::GetCurrentTimeMicros();
+  w.PrintProperty64("lookup_iterations", kIters);
+  w.PrintProperty64("lookup_total_micros", t1 - t0);
+  w.PrintProperty("lookup_note",
+                  "linear scan over a GrowableObjectArray; correctness first, "
+                  "and the cost is recorded rather than optimised around");
+  w.PrintProperty64("lookup_sink", sink);
+  w.CloseObject();
+
+  w.CloseObject();
+
+  auto* f = fopen(path, "w");
+  if (f == nullptr) {
+    OS::PrintErr("MaotRegistry: cannot open '%s'\n", path);
+    return;
+  }
+  fputs(w.ToCString(), f);
+  fclose(f);
 }
 
 void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
