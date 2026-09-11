@@ -1657,6 +1657,7 @@ void Precompiler::MaterializeMutableAotRegistry() {
   GrowableArray<const String*> keep_ids;
   GrowableArray<const Function*> keep_fns;
   GrowableArray<const String*> keep_abis;
+  GrowableArray<const String*> keep_call_convs;
   GrowableArray<bool> keep_selected;
   intptr_t selected_seen = 0;
   intptr_t dropped = 0;
@@ -1693,6 +1694,13 @@ void Precompiler::MaterializeMutableAotRegistry() {
     keep_ids.Add(&String::ZoneHandle(Z, id.ptr()));
     keep_fns.Add(&Function::ZoneHandle(Z, fn.ptr()));
     keep_abis.Add(&String::ZoneHandle(Z, abi.ptr()));
+    // The first moment the answer exists: unboxing is decided, so the final
+    // AOT calling convention can be read off the Function. It could not be
+    // computed at kernel-load time, and it cannot be recomputed in the
+    // deployed runtime -- unboxed_parameters_info_ is compiled out of
+    // DART_PRECOMPILED_RUNTIME. It travels as data or not at all.
+    keep_call_convs.Add(&String::ZoneHandle(Z,
+        MaotRegistry::ComputeCallConvention(T, fn)));
     // Carry the real flag through. Rewriting it to true would make the
     // --maot_materialize_unselected falsification unable to show the defect it
     // exists to show: an unselected declaration holding an authoritative slot.
@@ -1702,7 +1710,8 @@ void Precompiler::MaterializeMutableAotRegistry() {
   MaotRegistry::Clear(T);
   for (intptr_t i = 0; i < keep_ids.length(); i++) {
     const bool ok = MaotRegistry::Register(T, *keep_ids[i], keep_selected[i],
-                                          *keep_fns[i], *keep_abis[i]);
+                                          *keep_fns[i], *keep_abis[i],
+                                          *keep_call_convs[i]);
     ASSERT(ok);
   }
   MaotRegistry::SetMaterializationStats(selected_seen, keep_ids.length(),

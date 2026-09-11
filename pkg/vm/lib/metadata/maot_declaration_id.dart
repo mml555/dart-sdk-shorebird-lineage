@@ -66,12 +66,25 @@ class MaotAbiDescriptor {
   /// type arguments to be passed.
   final bool ownerIsGeneric;
 
+  /// The identity of each type parameter's bound, in declaration order.
+  ///
+  /// Derived from the VM, not from a wish list. `BuildTypeArgumentTypeChecks`
+  /// emits the callee's bound checks only when `!AllDynamicBounds()`, and the
+  /// bounds decide which type arguments the callee accepts. A replacement that
+  /// narrows `<T extends num>` to `<T extends int>` leaves every caller
+  /// compiled against the wider contract, so it is not an unchanged-ABI
+  /// replacement even though every count matches.
+  ///
+  /// Rendered through #65 class identity, never a raw name or path -- see
+  /// [renderType].
+  final List<String> typeParameterBounds;
+
   /// Reconstructs a descriptor from [canonicalForm]. Total by construction:
   /// the canonical form is the serialized representation, so a value that
   /// cannot be parsed is a corrupt payload rather than a shape to guess at.
   factory MaotAbiDescriptor.parse(String canonical) {
     final parts = canonical.split(';');
-    if (parts.length != 7) {
+    if (parts.length != 8) {
       throw FormatException('not a MAOT ABI canonical form: $canonical');
     }
     final positional = parts[1].substring(1).split('/');
@@ -89,6 +102,7 @@ class MaotAbiDescriptor {
       typeParameterCount: int.parse(parts[4].substring(1)),
       hasReceiver: parts[5] == 'recv',
       ownerIsGeneric: parts[6] == 'ogen',
+      typeParameterBounds: list(parts[7]),
     );
   }
 
@@ -101,11 +115,30 @@ class MaotAbiDescriptor {
     required this.typeParameterCount,
     required this.hasReceiver,
     required this.ownerIsGeneric,
+    this.typeParameterBounds = const <String>[],
   });
 
-  /// A canonical rendering. The runtime compares descriptors by this string's
-  /// digest rather than by walking structures, and it must never include a
-  /// name, a path or an address — only shape.
+  /// Whether every part of this descriptor could be represented.
+  ///
+  /// A bound the renderer does not know how to spell becomes an explicit
+  /// `unrepresentable:` token rather than something that happens to compare
+  /// equal to another unknown. Compatibility cannot be certified for such a
+  /// declaration, and the runtime refuses to stage against it.
+  bool get isRepresentable =>
+      !typeParameterBounds.any((b) => b.startsWith('unrepresentable:'));
+
+  /// A canonical rendering.
+  ///
+  /// It carries SHAPE and #65 IDENTITY REFERENCES, and never a raw name, a
+  /// file path or an address. A bound necessarily refers to a type, and the
+  /// only stable way this program has to refer to one is the #65 class id --
+  /// which is what [renderType] emits. Spelling a bound as `num` would be a
+  /// name; spelling it as `lib:dart:core::cls:num` is an identity.
+  ///
+  /// This is the KERNEL/SOURCE-CALL half of the compatibility model. The AOT
+  /// calling convention half cannot be computed here: it depends on unboxing
+  /// decisions the VM precompiler has not made yet, so the runtime attaches it
+  /// at materialization. See MaotRegistry's call-convention descriptor.
   String get canonicalForm => [
     'k$memberKind',
     'p$requiredPositionalCount/$totalPositionalCount',
@@ -114,6 +147,7 @@ class MaotAbiDescriptor {
     't$typeParameterCount',
     hasReceiver ? 'recv' : 'norecv',
     ownerIsGeneric ? 'ogen' : 'onogen',
+    'b${typeParameterBounds.join("|")}',
   ].join(';');
 
   @override
@@ -272,7 +306,7 @@ class MaotDeclarationIdMetadataRepository
         mapping[member] = MaotDeclarationIdMetadata(
           declarationId: id.id,
           selected: selectedIds.contains(id.id),
-          abi: describeAbi(member, id),
+          abi: describeAbi(member, id, identity),
         );
       }
 
@@ -290,7 +324,11 @@ class MaotDeclarationIdMetadataRepository
   }
 
   /// Derives the ABI descriptor from the Kernel member.
-  static MaotAbiDescriptor describeAbi(Member member, MaotId id) {
+  static MaotAbiDescriptor describeAbi(
+    Member member,
+    MaotId id,
+    MaotIdentity identity,
+  ) {
     final function = member.function;
     final owner = member.enclosingClass;
     final named = <String>[];
@@ -298,6 +336,8 @@ class MaotDeclarationIdMetadataRepository
     var requiredPositional = 0;
     var totalPositional = 0;
     var typeParameterCount = 0;
+
+    final bounds = <String>[];
 
     if (function != null) {
       requiredPositional = function.requiredParameterCount;
@@ -309,10 +349,17 @@ class MaotDeclarationIdMetadataRepository
       }
       named.sort();
       requiredNamed.sort();
+      // In DECLARATION order, never sorted: the bound of type parameter 0 is
+      // a different fact from the bound of type parameter 1, and sorting
+      // would let a reordering compare equal.
+      for (final tp in function.typeParameters) {
+        bounds.add(renderType(tp.bound, identity, function.typeParameters));
+      }
     }
 
     return MaotAbiDescriptor(
       memberKind: _memberKind(member),
+      typeParameterBounds: bounds,
       requiredPositionalCount: requiredPositional,
       totalPositionalCount: totalPositional,
       namedParameters: named,
@@ -321,6 +368,91 @@ class MaotDeclarationIdMetadataRepository
       hasReceiver: member.isInstanceMember,
       ownerIsGeneric: owner != null && owner.typeParameters.isNotEmpty,
     );
+  }
+
+  /// Renders a Kernel type as an identity string.
+  ///
+  /// Total by construction: a shape this does not know how to spell becomes
+  /// `unrepresentable:<node kind>` rather than a token that might accidentally
+  /// compare equal to a different unknown shape. The runtime refuses to stage
+  /// a replacement when either side carries such a token, because it cannot
+  /// certify a compatibility it could not describe.
+  ///
+  /// Type parameters are rendered BY POSITION within [scope], so renaming
+  /// `<T>` to `<E>` is not a change and reordering two parameters is.
+  static String renderType(
+    DartType type,
+    MaotIdentity identity,
+    List<TypeParameter> scope,
+  ) {
+    String nul(Nullability n) {
+      switch (n) {
+        case Nullability.nullable:
+          return '?';
+        case Nullability.nonNullable:
+          return '';
+        case Nullability.undetermined:
+          return '%';
+      }
+    }
+
+    String render(DartType t) {
+      if (t is DynamicType) return 'dyn';
+      if (t is VoidType) return 'void';
+      if (t is NeverType) return 'never${nul(t.nullability)}';
+      if (t is NullType) return 'null';
+      if (t is InvalidType) return 'unrepresentable:invalid';
+      if (t is InterfaceType) {
+        final args = t.typeArguments.map(render).join(',');
+        return '${identity.classId(t.classNode).id}'
+            '${args.isEmpty ? "" : "<$args>"}${nul(t.nullability)}';
+      }
+      if (t is FutureOrType) {
+        return 'futureor<${render(t.typeArgument)}>${nul(t.nullability)}';
+      }
+      if (t is TypeParameterType) {
+        final i = scope.indexOf(t.parameter);
+        // Out of scope means it belongs to the enclosing class, whose
+        // genericity is already recorded by ownerIsGeneric; naming it by
+        // position here would be a position in a different list.
+        return i >= 0
+            ? 'tp$i${nul(t.nullability)}'
+            : 'ownertp:${t.parameter.name ?? ""}${nul(t.nullability)}';
+      }
+      if (t is StructuralParameterType) {
+        return 'stp:${t.parameter.name ?? ""}${nul(t.nullability)}';
+      }
+      if (t is FunctionType) {
+        final pos = t.positionalParameters.map(render).join(',');
+        final named = [
+          for (final n in t.namedParameters)
+            '${n.isRequired ? "req " : ""}${n.name}:${render(n.type)}',
+        ]..sort();
+        return 'fn(${t.requiredParameterCount}/$pos'
+            '${named.isEmpty ? "" : ";{${named.join(",")}}"})'
+            '->${render(t.returnType)}${nul(t.nullability)}';
+      }
+      if (t is RecordType) {
+        final pos = t.positional.map(render).join(',');
+        final named = [
+          for (final n in t.named) '${n.name}:${render(n.type)}',
+        ]..sort();
+        return 'rec($pos${named.isEmpty ? "" : ";{${named.join(",")}}"})'
+            '${nul(t.nullability)}';
+      }
+      if (t is TypedefType) return render(t.unalias);
+      if (t is ExtensionType) {
+        final args = t.typeArguments.map(render).join(',');
+        return '${identity.extensionTypeId(t.extensionTypeDeclaration).id}'
+            '${args.isEmpty ? "" : "<$args>"}${nul(t.nullability)}';
+      }
+      if (t is IntersectionType) {
+        return 'isect<${render(t.left)},${render(t.right)}>';
+      }
+      return 'unrepresentable:${t.runtimeType}';
+    }
+
+    return render(type);
   }
 
   static int _memberKind(Member member) {

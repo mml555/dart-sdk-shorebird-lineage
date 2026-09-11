@@ -1816,7 +1816,12 @@ void KernelLoader::BindMaotDeclaration(intptr_t kernel_node_offset,
   if (!md.has_value) return;
   const String& id = H.DartSymbolPlain(md.declaration_id);
   const String& abi = H.DartSymbolPlain(md.abi_canonical);
-  if (!MaotRegistry::Register(thread_, id, md.selected, function, abi)) {
+  // The call convention is EMPTY here on purpose. Unboxing has not been
+  // decided at kernel-load time, so any value computed now would be a
+  // confident description of a decision the precompiler has not made. It is
+  // filled in at materialization.
+  if (!MaotRegistry::Register(thread_, id, md.selected, function, abi,
+                              Symbols::Empty())) {
     FATAL("MaotRegistry: duplicate declaration id '%s'", id.ToCString());
   }
 }
