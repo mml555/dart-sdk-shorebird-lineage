@@ -253,6 +253,12 @@ struct RetainReasons : public AllStatic {
   // The object is a main function of the root library.
   static constexpr const char* kMainFunction =
       "this is main function of the root library";
+  // The declaration was explicitly selected for Mutable-AOT body replacement.
+  // Selection is a RETENTION REASON: a declaration cannot be promised
+  // patchable after release if the release compiler was free to erase its
+  // implementation before shipping.
+  static constexpr const char* kMutableAotDeclaration =
+      "mutable-aot declaration";
   // The object has an entry point pragma that requires it be retained.
   static constexpr const char* kEntryPointPragma = "entry point pragma";
   // The function is a target of FFI callback.
@@ -680,6 +686,11 @@ void Precompiler::DoCompileAll() {
       AddTypeArguments(TypeArguments::Handle(
           Z, IG->object_store()->type_argument_string_string()));
 
+      // MUTABLE-AOT (#66): feed every selected declaration into the NORMAL
+      // precompiler worklist before the fixed point runs, so selection is an
+      // explicit input to retention rather than an accident of reachability.
+      SeedMutableAotRoots();
+
       // Compile newly found targets and add their callees until we reach a
       // fixed point.
       Iterate();
@@ -754,6 +765,12 @@ void Precompiler::DoCompileAll() {
       DropClasses();
       DropLibraries();
     }
+
+    // MUTABLE-AOT (#66): rebuild the registry from the RETAINED set, after
+    // dropping. Chosen over the earlier seam deliberately: the final registry
+    // should describe the final AOT program, not influence pruning by being
+    // reachable during it.
+    MaterializeMutableAotRegistry();
 
     {
       PRECOMPILER_TIMER_SCOPE(this, Obfuscate);
@@ -1527,6 +1544,87 @@ const char* Precompiler::MustRetainFunction(const Function& function) {
   }
 
   return nullptr;
+}
+
+
+void Precompiler::SeedMutableAotRoots() {
+  // Selection was decided in the front end and travels in the transient
+  // registry. Here it becomes an explicit reason for the precompiler to
+  // compile and retain the declaration, using the same authority path every
+  // other root uses -- not by writing functions_to_retain_ directly.
+  const intptr_t entries = MaotRegistry::Length(T);
+  auto& id = String::Handle(Z);
+  auto& abi = String::Handle(Z);
+  auto& fn = Function::Handle(Z);
+  bool selected = false;
+  intptr_t seeded = 0;
+  intptr_t skipped_abstract = 0;
+  for (intptr_t i = 0; i < entries; i++) {
+    MaotRegistry::EntryAt(T, i, &id, &selected, &fn, &abi);
+    if (!selected || fn.IsNull()) continue;
+    if (fn.is_abstract()) {
+      // A body-less declaration has no AOT body to replace. #63 classifies it;
+      // it is not forced into the body-replacement registry, and AddFunction
+      // asserts against it anyway.
+      skipped_abstract++;
+      continue;
+    }
+    AddFunction(fn, RetainReasons::kMutableAotDeclaration);
+    AddTypesOf(fn);  // retains the owning class and its type graph
+    seeded++;
+  }
+  if (FLAG_maot_trace_registration) {
+    OS::PrintErr("[maot] seeded %" Pd " selected declarations as retention "
+                 "roots (%" Pd " abstract skipped)\n", seeded,
+                 skipped_abstract);
+  }
+}
+
+void Precompiler::MaterializeMutableAotRegistry() {
+  // The transient table carried the load-time association. The FINAL registry
+  // contains only SELECTED declarations whose Function the precompiler
+  // actually retained -- an unselected declaration must never receive an
+  // authoritative slot, and a selected one that failed to survive must be
+  // visible rather than silently absent.
+  const intptr_t entries = MaotRegistry::Length(T);
+  GrowableArray<const String*> keep_ids;
+  GrowableArray<const Function*> keep_fns;
+  GrowableArray<const String*> keep_abis;
+  intptr_t selected_seen = 0;
+  intptr_t dropped = 0;
+
+  for (intptr_t i = 0; i < entries; i++) {
+    auto& id = String::Handle(Z);
+    auto& abi = String::Handle(Z);
+    auto& fn = Function::Handle(Z);
+    bool selected = false;
+    MaotRegistry::EntryAt(T, i, &id, &selected, &fn, &abi);
+    if (!selected) continue;
+    selected_seen++;
+    if (fn.IsNull() || !functions_to_retain_.ContainsKey(fn)) {
+      dropped++;
+      if (FLAG_maot_trace_registration) {
+        OS::PrintErr("[maot] selected declaration NOT retained: %s\n",
+                     id.ToCString());
+      }
+      continue;
+    }
+    keep_ids.Add(&String::ZoneHandle(Z, id.ptr()));
+    keep_fns.Add(&Function::ZoneHandle(Z, fn.ptr()));
+    keep_abis.Add(&String::ZoneHandle(Z, abi.ptr()));
+  }
+
+  MaotRegistry::Clear(T);
+  for (intptr_t i = 0; i < keep_ids.length(); i++) {
+    MaotRegistry::Register(T, *keep_ids[i], /*selected=*/true, *keep_fns[i],
+                           *keep_abis[i]);
+  }
+  MaotRegistry::SetMaterializationStats(selected_seen, keep_ids.length(),
+                                        dropped);
+  if (FLAG_maot_trace_registration) {
+    OS::PrintErr("[maot] materialized %" Pd " of %" Pd " selected (%" Pd
+                 " dropped)\n", keep_ids.length(), selected_seen, dropped);
+  }
 }
 
 void Precompiler::AddFunction(const Function& function,

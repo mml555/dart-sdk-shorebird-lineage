@@ -322,6 +322,13 @@ class Precompiler : public ValueObject {
   void AddClosureCall(const String& selector,
                       const Array& arguments_descriptor);
   void AddFunction(const Function& function, const char* retain_reason);
+
+  // Mutable-AOT (#66). SeedMutableAotRoots feeds selected declarations into
+  // the ordinary retention/compilation worklist; MaterializeMutableAotRegistry
+  // rebuilds the serialized registry from functions_to_retain_ once dropping
+  // has settled.
+  void SeedMutableAotRoots();
+  void MaterializeMutableAotRegistry();
   void AddInstantiatedClass(const Class& cls);
   void AddSelector(const String& selector);
   bool IsSent(const String& selector);

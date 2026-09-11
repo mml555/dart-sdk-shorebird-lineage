@@ -383,6 +383,9 @@ class KernelLoader : public ValueObject {
   TypeTranslator type_translator_;
   InferredTypeMetadataHelper inferred_type_metadata_helper_;
   MaotDeclarationIdMetadataHelper maot_declaration_id_metadata_helper_;
+  void BindMaotDeclaration(intptr_t kernel_node_offset,
+                           const Function& function,
+                           const char* seam);
 
   Object& static_field_value_;
 

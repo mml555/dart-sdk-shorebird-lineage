@@ -77,6 +77,36 @@ intptr_t MaotRegistry::Length(Thread* thread) {
   return storage.Length() / kEntrySize;
 }
 
+static intptr_t maot_stat_selected = -1;
+static intptr_t maot_stat_retained = -1;
+static intptr_t maot_stat_dropped = -1;
+
+void MaotRegistry::SetMaterializationStats(intptr_t selected,
+                                           intptr_t retained,
+                                           intptr_t dropped) {
+  maot_stat_selected = selected;
+  maot_stat_retained = retained;
+  maot_stat_dropped = dropped;
+}
+
+void MaotRegistry::EntryAt(Thread* thread,
+                           intptr_t index,
+                           String* declaration_id,
+                           bool* selected,
+                           Function* implementation,
+                           String* abi_descriptor) {
+  *declaration_id = String::RawCast(FieldAt(thread, index, kDeclarationId));
+  *selected = Smi::Value(Smi::RawCast(FieldAt(thread, index, kSelected))) == 1;
+  *implementation = Function::RawCast(FieldAt(thread, index, kCurrentImpl));
+  *abi_descriptor = String::RawCast(FieldAt(thread, index, kCurrentAbi));
+}
+
+void MaotRegistry::Clear(Thread* thread) {
+  const auto& storage =
+      GrowableObjectArray::Handle(thread->zone(), EnsureStorage(thread));
+  storage.SetLength(0);
+}
+
 intptr_t MaotRegistry::IndexOf(Thread* thread, const String& declaration_id) {
   Zone* zone = thread->zone();
   const auto& storage = GrowableObjectArray::Handle(zone, EnsureStorage(thread));
@@ -263,6 +293,9 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
 
   const intptr_t entries = Length(thread);
   writer.PrintProperty64("entry_count", entries);
+  writer.PrintProperty64("selected_seen_at_materialization", maot_stat_selected);
+  writer.PrintProperty64("retained_at_materialization", maot_stat_retained);
+  writer.PrintProperty64("dropped_at_materialization", maot_stat_dropped);
 
   writer.OpenArray("entries");
   auto& id = String::Handle(zone);

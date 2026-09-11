@@ -8,6 +8,14 @@ import 'package:kernel/target/targets.dart' show Target;
 
 // Pragmas recognized by the VM
 const kVmEntryPointPragmaName = "vm:entry-point";
+
+// MUTABLE-AOT (#66). Selecting a declaration for body replacement is a
+// RETENTION reason, not just a label: a declaration cannot be promised
+// patchable after release if the release compiler was free to erase it.
+// Treating it as an entry point is what makes the Dart tree shaker keep an
+// otherwise-unreachable selected declaration -- the VM precompiler is told
+// the same thing separately, via RetainReasons::kMutableAotDeclaration.
+const kMaotMutablePragmaName = "maot:mutable";
 const kVmExactResultTypePragmaName = "vm:exact-result-type";
 const kResultTypeUsesPassedTypeArguments =
     "result-type-uses-passed-type-arguments";
@@ -183,6 +191,10 @@ class ConstantPragmaAnnotationParser implements PragmaAnnotationParser {
     switch (pragmaName) {
       case kVmEntryPointPragmaName:
         return getEntryPointTypeFromOptions(options, pragmaName);
+      case kMaotMutablePragmaName:
+        // Retained for the same reason an entry point is: something outside
+        // the release's own call graph may need to reach it later.
+        return const ParsedEntryPointPragma(PragmaEntryPointType.Default);
       case kVmExactResultTypePragmaName:
         if (options is TypeLiteralConstant) {
           return ParsedResultTypeByTypePragma(options.type, false);
