@@ -4,6 +4,8 @@
 
 #include "vm/compiler/backend/inliner.h"
 
+#include "vm/maot_registry.h"
+
 #include "vm/compiler/aot/aot_call_specializer.h"
 #include "vm/compiler/aot/precompiler.h"
 #include "vm/compiler/backend/block_scheduler.h"
@@ -1023,6 +1025,15 @@ class CallSiteInliner : public ValueObject {
   InliningDecision ShouldWeInline(const Function& callee,
                                   intptr_t instr_count,
                                   intptr_t call_site_count) {
+    // MUTABLE-AOT (#67), conservative posture. An inlined copy of a selected
+    // declaration is a caller that never reaches the dispatch cell, so
+    // installing a replacement would be invisible to it. Checked BEFORE
+    // AlwaysInline: a force-inline pragma must not win over mutability.
+    // #68 generalises this into the real optimizer contract.
+    if (CompilerState::Current().is_aot() &&
+        MaotRegistry::IsMutableDeclaration(Thread::Current(), callee)) {
+      return InliningDecision::No("mutable-aot declaration");
+    }
     // Pragma or size heuristics.
     if (inliner_->AlwaysInline(callee)) {
       return InliningDecision::Yes("AlwaysInline");
