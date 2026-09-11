@@ -1860,16 +1860,35 @@ void KernelLoader::LoadProcedure(const Library& library,
   // by name, by address, or by a kernel offset the precompiled runtime does
   // not carry -- is the architecture this program exists to eliminate.
   {
+    // THE COMPONENT-ABSOLUTE OFFSET IS `+ library_kernel_offset_`, NOT
+    // `+ correction_offset_`. KernelLoader has two constructors with two
+    // different conventions, and they agree only on the eager path:
+    //
+    //   eager (whole program) : correction_offset_ == library_kernel_offset_
+    //   deferred (per library): correction_offset_ == 0, and the reader sees
+    //                           a per-library slice, so only
+    //                           library_kernel_offset_ recovers the absolute
+    //
+    // Top-level procedures of a normal registered library are loaded by the
+    // DEFERRED loader, so `+ correction_offset_` yielded slice-relative
+    // offsets (71, 119, 182...) that matched no mapping -- and once matched a
+    // mapping belonging to a different declaration, which is how a correct id
+    // came to be bound to the wrong Function. ReadInferredType, the working
+    // precedent in this same file, uses `+ library_kernel_offset_`.
+    const intptr_t maot_absolute_offset =
+        procedure_offset + library_kernel_offset_;
     const MaotDeclarationIdMetadata maot_md =
         maot_declaration_id_metadata_helper_.GetMaotDeclarationId(
-            // ABSOLUTE component offset. `procedure_offset` is relative to the
-            // library (correction_offset_ == library_kernel_offset_), while
-            // metadata mappings are keyed by absolute offsets -- looking up
-            // with the relative one silently finds nothing.
-            procedure_offset + correction_offset_);
-    if (FLAG_maot_trace_registration && !maot_md.has_value) {
-      OS::PrintErr("[maot] MISS abs=%" Pd " name=%s\n",
-                   procedure_offset + correction_offset_, name.ToCString());
+            maot_absolute_offset);
+    if (FLAG_maot_trace_registration) {
+      // The four facts side by side, so an id/Function mismatch is diagnosable
+      // rather than inferred: where we looked, what the payload said, and what
+      // Function is being constructed at this seam.
+      OS::PrintErr("[maot] %s rel=%" Pd " corr=%" Pd " libstart=%" Pd
+                   " abs=%" Pd " name=%s\n",
+                   maot_md.has_value ? "HIT " : "MISS", procedure_offset,
+                   correction_offset_, library_kernel_offset_,
+                   maot_absolute_offset, name.ToCString());
     }
     if (maot_md.has_value) {
       const String& maot_id = H.DartSymbolPlain(maot_md.declaration_id);
