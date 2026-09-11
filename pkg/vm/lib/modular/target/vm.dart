@@ -11,6 +11,8 @@ import 'package:kernel/target/changed_structure_notifier.dart';
 import 'package:kernel/target/targets.dart';
 
 import '../transformations/call_site_annotator.dart' as callSiteAnnotator;
+// pragma.dart depends only on the ABSTRACT Target, so this is not a cycle.
+import '../../transformations/pragma.dart' show kMaotMutablePragmaName;
 import '../transformations/deeply_immutable.dart' as deeply_immutable;
 import '../transformations/lowering.dart'
     as lowering
@@ -601,5 +603,19 @@ class VmTarget extends Target {
 
   @override
   bool isSupportedPragma(String pragmaName) =>
-      pragmaName.startsWith("vm:") || pragmaName.startsWith("dyn-module:");
+      pragmaName.startsWith("vm:") ||
+      pragmaName.startsWith("dyn-module:") ||
+      // MUTABLE-AOT (#66). EXACT match, deliberately not a "maot:" prefix.
+      //
+      // This gate runs BEFORE ConstantPragmaAnnotationParser's switch, so a
+      // parser arm for an unsupported name is unreachable -- the pragma looks
+      // fully implemented and does nothing at all. That is exactly how
+      // maot:mutable failed to retain a dead selected declaration, and the
+      // instrumentation showed the arm was never entered.
+      //
+      // Accepting the whole namespace would let a misspelled or future maot:
+      // pragma appear supported and silently acquire retention semantics. We
+      // own exactly one pragma today, so exactly one is accepted and
+      // everything else stays fail-closed.
+      pragmaName == kMaotMutablePragmaName;
 }
