@@ -1548,6 +1548,15 @@ const char* Precompiler::MustRetainFunction(const Function& function) {
 
 
 void Precompiler::SeedMutableAotRoots() {
+  if (FLAG_maot_disable_seeding) {
+    // The falsification control: binding and registration still happen, so the
+    // registry looks populated, but nothing tells the compiler to keep or
+    // compile these declarations.
+    if (FLAG_maot_trace_registration) {
+      OS::PrintErr("[maot] SEEDING DISABLED (falsification control)\n");
+    }
+    return;
+  }
   // Selection was decided in the front end and travels in the transient
   // registry. Here it becomes an explicit reason for the precompiler to
   // compile and retain the declaration, using the same authority path every
@@ -1569,8 +1578,22 @@ void Precompiler::SeedMutableAotRoots() {
       skipped_abstract++;
       continue;
     }
+    // Record WHY AddFunction will or will not queue this function. Both of
+    // its early returns skip pending_functions_, so a selected declaration
+    // can end up retained-but-never-compiled without anything saying so.
+    const bool already_possibly_retained =
+        possibly_retained_functions_.ContainsKey(fn);
+    const bool already_seen = seen_functions_.ContainsKey(fn);
+    const bool had_code_before = fn.HasCode();
     AddFunction(fn, RetainReasons::kMutableAotDeclaration);
     AddTypesOf(fn);  // retains the owning class and its type graph
+    if (FLAG_maot_trace_registration) {
+      OS::PrintErr("[maot] seed %s possibly_retained_before=%d seen_before=%d "
+                   "hascode_before=%d queued=%d\n", id.ToCString(),
+                   already_possibly_retained ? 1 : 0, already_seen ? 1 : 0,
+                   had_code_before ? 1 : 0,
+                   (!already_possibly_retained && !already_seen) ? 1 : 0);
+    }
     seeded++;
   }
   if (FLAG_maot_trace_registration) {
@@ -1601,11 +1624,24 @@ void Precompiler::MaterializeMutableAotRegistry() {
     MaotRegistry::EntryAt(T, i, &id, &selected, &fn, &abi);
     if (!selected) continue;
     selected_seen++;
-    if (fn.IsNull() || !functions_to_retain_.ContainsKey(fn)) {
+    if (FLAG_maot_trace_registration) {
+      OS::PrintErr("[maot] materialize %s retained=%d hascode=%d\n",
+                   id.ToCString(),
+                   (!fn.IsNull() && functions_to_retain_.ContainsKey(fn)) ? 1 : 0,
+                   (!fn.IsNull() && fn.HasCode()) ? 1 : 0);
+    }
+    // FAIL CLOSED. An AOT descriptor claims to point at the release
+    // implementation, so a retained Function SHELL with no executable body
+    // must not become a slot: that is false-safe state -- kind=AOT, version=1,
+    // Function present, nothing to actually replace.
+    const bool retained = !fn.IsNull() && functions_to_retain_.ContainsKey(fn);
+    const bool executable = !fn.IsNull() && fn.HasCode();
+    if (!retained || !executable) {
       dropped++;
       if (FLAG_maot_trace_registration) {
-        OS::PrintErr("[maot] selected declaration NOT retained: %s\n",
-                     id.ToCString());
+        OS::PrintErr("[maot] selected declaration REFUSED: %s retained=%d "
+                     "executable=%d\n", id.ToCString(), retained ? 1 : 0,
+                     executable ? 1 : 0);
       }
       continue;
     }

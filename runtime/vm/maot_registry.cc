@@ -21,6 +21,16 @@ DEFINE_FLAG(charp,
             "serialization (diagnostic).");
 
 DEFINE_FLAG(bool,
+            maot_disable_seeding,
+            false,
+            "FALSIFICATION CONTROL. Skip feeding selected declarations into "
+            "the precompiler's retention/compilation worklist, while leaving "
+            "binding and the registry intact. Proves that registry existence "
+            "is not sufficient: without the retention root a selected "
+            "declaration reaches materialization with no executable body and "
+            "must be refused.");
+
+DEFINE_FLAG(bool,
             maot_trace_registration,
             false,
             "Trace each Mutable-AOT registry registration (diagnostic).");
@@ -320,6 +330,15 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
     // address. A name here is diagnostic provenance, not identity: identity is
     // the declaration_id above.
     writer.PrintProperty("implementation_present", impl.IsNull() ? "no" : "yes");
+    // Retaining a Function SHELL is not the same as having something to
+    // replace. The instruction-size report is NOT authoritative here -- it
+    // omitted functions that demonstrably had Code -- so the descriptor is
+    // judged by the VM's own state.
+    const bool has_code = !impl.IsNull() && impl.HasCode();
+    writer.PrintPropertyBool("executable", has_code);
+    writer.PrintProperty64(
+        "implementation_size",
+        has_code ? Code::Handle(impl.CurrentCode()).Size() : 0);
     // Retaining a Function SHELL is not the same as having something to
     // replace. A selected declaration the release never calls must still
     // carry real AOT code, or the initial AOT descriptor is a promise with
