@@ -320,6 +320,11 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
     // address. A name here is diagnostic provenance, not identity: identity is
     // the declaration_id above.
     writer.PrintProperty("implementation_present", impl.IsNull() ? "no" : "yes");
+    // Retaining a Function SHELL is not the same as having something to
+    // replace. A selected declaration the release never calls must still
+    // carry real AOT code, or the initial AOT descriptor is a promise with
+    // no implementation behind it.
+    writer.PrintPropertyBool("has_code", !impl.IsNull() && impl.HasCode());
     writer.PrintProperty("implementation_name_diagnostic",
                          impl.IsNull() ? "<null>" : impl.ToCString());
     writer.CloseObject();
