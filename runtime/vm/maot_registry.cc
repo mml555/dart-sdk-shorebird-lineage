@@ -198,7 +198,8 @@ bool MaotRegistry::Register(Thread* thread,
                             const Function& implementation,
                             const String& abi_descriptor,
                             const String& call_convention,
-                            const Array& dispatch_cell) {
+                            const Array& dispatch_cell,
+                            const String& implementation_id) {
   Zone* zone = thread->zone();
   if (IndexOf(thread, declaration_id) >= 0) {
     return false;  // duplicate: the caller decides how loudly to fail
@@ -242,6 +243,17 @@ bool MaotRegistry::Register(Thread* thread,
                   : Object::Handle(zone, implementation.CurrentCode()),
               Heap::kOld);                                   // release code
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // call sites
+  // At registration the implementation IS the declaration: a release body is
+  // supplied by the declaration it belongs to. Installation is what makes the
+  // two diverge, and that divergence is the fact worth recording.
+  {
+    const auto& impl_id = String::Handle(zone,
+        implementation_id.IsNull() ? declaration_id.ptr()
+                                   : implementation_id.ptr());
+    storage.Add(impl_id, Heap::kOld);   // current implementation id
+    storage.Add(impl_id, Heap::kOld);   // release implementation id
+  }
+  storage.Add(Object::null_object(), Heap::kOld);            // staged impl id
   storage.Add(Smi::Handle(zone, Smi::New(-1)), Heap::kOld);  // staged kind
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // staged version
   storage.Add(Object::null_object(), Heap::kOld);            // staged impl
@@ -329,6 +341,7 @@ void MaotRegistry::AbandonStagedForTesting(Thread* thread,
   SetFieldAt(thread, entry, kStagedImpl, Object::null_object());
   SetFieldAt(thread, entry, kStagedAbi, Object::null_object());
   SetFieldAt(thread, entry, kStagedCallConv, Object::null_object());
+  SetFieldAt(thread, entry, kStagedImplId, Object::null_object());
 }
 
 intptr_t MaotRegistry::LookupByFunctionNameForFalsification(
@@ -467,7 +480,7 @@ intptr_t MaotRegistry::InstallForTesting(Thread* thread,
   // Every check #66 already owns runs here, in the same order, before
   // anything is visible: namespace, ABI, calling convention, version.
   if (!StageReplacement(thread, declaration_id, kPatchCode, version, impl, abi,
-                        cc, patch_namespace)) {
+                        cc, patch_namespace, implementation_id)) {
     return -3;
   }
   if (!CommitStagedForTesting(thread, declaration_id)) {
@@ -553,7 +566,8 @@ bool MaotRegistry::StageReplacement(Thread* thread,
                                     const Function& implementation,
                                     const String& abi_descriptor,
                                     const String& call_convention,
-                                    const String& patch_namespace) {
+                                    const String& patch_namespace,
+                                    const String& implementation_id) {
   const intptr_t entry = IndexOf(thread, declaration_id);
   if (entry < 0) return false;  // missing id is refused, never created
 
@@ -603,6 +617,7 @@ bool MaotRegistry::StageReplacement(Thread* thread,
   SetFieldAt(thread, entry, kStagedImpl, implementation);
   SetFieldAt(thread, entry, kStagedAbi, abi_descriptor);
   SetFieldAt(thread, entry, kStagedCallConv, call_convention);
+  SetFieldAt(thread, entry, kStagedImplId, implementation_id);
   return true;
 }
 
@@ -666,12 +681,15 @@ bool MaotRegistry::CommitStagedForTesting(Thread* thread,
              Object::Handle(zone, FieldAt(thread, entry, kStagedAbi)));
   SetFieldAt(thread, entry, kCurrentCallConv,
              Object::Handle(zone, FieldAt(thread, entry, kStagedCallConv)));
+  SetFieldAt(thread, entry, kCurrentImplId,
+             Object::Handle(zone, FieldAt(thread, entry, kStagedImplId)));
 
   SetFieldAt(thread, entry, kStagedKind, Smi::Handle(zone, Smi::New(-1)));
   SetFieldAt(thread, entry, kStagedVersion, Smi::Handle(zone, Smi::New(0)));
   SetFieldAt(thread, entry, kStagedImpl, Object::null_object());
   SetFieldAt(thread, entry, kStagedAbi, Object::null_object());
   SetFieldAt(thread, entry, kStagedCallConv, Object::null_object());
+  SetFieldAt(thread, entry, kStagedImplId, Object::null_object());
   return true;
 }
 
@@ -1276,7 +1294,21 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
           cell.IsNull() ? Object::null() : cell.At(0));
       const auto& current_fn = Function::Handle(zone,
           Function::RawCast(FieldAt(thread, i, kCurrentImpl)));
+      const auto& cur_id = String::Handle(zone,
+          String::RawCast(FieldAt(thread, i, kCurrentImplId)));
+      const auto& rel_id = String::Handle(zone,
+          String::RawCast(FieldAt(thread, i, kReleaseImplId)));
+      // The identity of what is currently installed, as a #65 DeclarationId.
+      // The name diagnostics beside it are for a human reading the record;
+      // nothing decides on them.
+      writer.PrintProperty("current_implementation_id",
+                           cur_id.IsNull() ? "<absent>" : cur_id.ToCString());
+      writer.PrintPropertyBool(
+          "current_implementation_is_the_declaration_itself",
+          !cur_id.IsNull() && cur_id.Equals(id));
       writer.OpenObject("release");
+      writer.PrintProperty("implementation_id",
+                           rel_id.IsNull() ? "<absent>" : rel_id.ToCString());
       writer.PrintProperty("implementation_name_diagnostic",
                            release_fn.IsNull() ? "<absent>"
                                                : release_fn.ToCString());

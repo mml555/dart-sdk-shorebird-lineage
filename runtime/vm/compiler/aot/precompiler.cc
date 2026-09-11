@@ -1730,7 +1730,8 @@ void Precompiler::MaterializeMutableAotRegistry() {
   for (intptr_t i = 0; i < keep_ids.length(); i++) {
     const bool ok = MaotRegistry::Register(T, *keep_ids[i], keep_selected[i],
                                           *keep_fns[i], *keep_abis[i],
-                                          *keep_call_convs[i], *keep_cells[i]);
+                                          *keep_call_convs[i], *keep_cells[i],
+                                          *keep_ids[i]);
     MaotRegistry::SetCallSiteCountFor(T, *keep_ids[i], keep_call_sites[i]);
     ASSERT(ok);
   }
