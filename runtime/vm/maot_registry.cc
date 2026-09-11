@@ -185,12 +185,59 @@ bool MaotRegistry::Register(Thread* thread,
   storage.Add(Smi::Handle(zone, Smi::New(kAot)), Heap::kOld);
   storage.Add(Smi::Handle(zone, Smi::New(1)), Heap::kOld);
   storage.Add(implementation, Heap::kOld);
+  // Pin the Code the descriptor is being made against. Function::CurrentCode()
+  // is a mutable field, so a descriptor that holds only the Function follows
+  // whatever is later attached to it and can never report that it has been
+  // bypassed.
+  storage.Add(implementation.IsNull() || !implementation.HasCode()
+                  ? Object::null_object()
+                  : Object::Handle(zone, implementation.CurrentCode()),
+              Heap::kOld);
   storage.Add(abi_descriptor, Heap::kOld);
   storage.Add(Smi::Handle(zone, Smi::New(-1)), Heap::kOld);  // staged kind
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // staged version
   storage.Add(Object::null_object(), Heap::kOld);            // staged impl
   storage.Add(Object::null_object(), Heap::kOld);            // staged abi
   return true;
+}
+
+bool MaotRegistry::RepinCurrentCode(Thread* thread, intptr_t index) {
+  Zone* zone = thread->zone();
+  const auto& fn =
+      Function::Handle(zone, Function::RawCast(FieldAt(thread, index,
+                                                       kCurrentImpl)));
+  const auto& before = Object::Handle(zone, FieldAt(thread, index,
+                                                    kCurrentCode));
+  const auto& now = Object::Handle(zone,
+      fn.IsNull() || !fn.HasCode() ? Object::null() : fn.CurrentCode());
+  if (before.ptr() == now.ptr()) return false;
+  SetFieldAt(thread, index, kCurrentCode, now);
+  return true;
+}
+
+intptr_t MaotRegistry::CountDivergedImplementations(Thread* thread,
+                                                    String* diverged_id) {
+  Zone* zone = thread->zone();
+  const intptr_t entries = Length(thread);
+  auto& fn = Function::Handle(zone);
+  auto& pinned = Object::Handle(zone);
+  auto& id = String::Handle(zone);
+  intptr_t diverged = 0;
+  for (intptr_t i = 0; i < entries; i++) {
+    fn ^= FieldAt(thread, i, kCurrentImpl);
+    pinned = FieldAt(thread, i, kCurrentCode);
+    if (pinned.IsNull()) continue;  // nothing was pinned; nothing to compare
+    const bool same = !fn.IsNull() && fn.HasCode() &&
+                      fn.CurrentCode() == Code::RawCast(pinned.ptr());
+    if (!same) {
+      if (diverged == 0 && diverged_id != nullptr) {
+        id ^= FieldAt(thread, i, kDeclarationId);
+        *diverged_id = id.ptr();
+      }
+      diverged++;
+    }
+  }
+  return diverged;
 }
 
 void MaotRegistry::SetNamespace(Thread* thread,
@@ -309,6 +356,15 @@ bool MaotRegistry::CommitStagedForTesting(Thread* thread,
   SetFieldAt(thread, entry, kCurrentVersion,
              Smi::Handle(zone, Smi::New(staged_version)));
   SetFieldAt(thread, entry, kCurrentImpl, staged_impl);
+  // Re-pin: after a commit the descriptor describes the staged
+  // implementation, so the Code it is compared against has to move with it.
+  const auto& staged_fn = Function::Handle(zone,
+      staged_impl.IsFunction() ? Function::Cast(staged_impl).ptr()
+                               : Function::null());
+  SetFieldAt(thread, entry, kCurrentCode,
+             staged_fn.IsNull() || !staged_fn.HasCode()
+                 ? Object::null_object()
+                 : Object::Handle(zone, staged_fn.CurrentCode()));
   SetFieldAt(thread, entry, kCurrentAbi,
              Object::Handle(zone, FieldAt(thread, entry, kStagedAbi)));
 
@@ -475,7 +531,136 @@ void MaotRegistry::RunSelfTest(Thread* thread, const char* path) {
   arm("D01", "duplicate registration is refused", d01,
       d01 ? "refused" : "ACCEPTED");
 
+  // A01' -- the same declaration id spelled from a different release is a
+  // different entity. Covered by N01; kept adjacent for readability.
+
+  // L01 -- two declarations that share a VM Function NAME but differ in
+  // DeclarationId must not resolve to one another. The issue asks the gate to
+  // catch "lookup that accidentally succeeds by function name while
+  // declaration IDs differ", and a lookup keyed by identity can only be shown
+  // to be keyed by identity when two entries exist that a name-keyed lookup
+  // would confuse.
+  auto& name_i = String::Handle(zone);
+  auto& name_j = String::Handle(zone);
+  auto& id_i = String::Handle(zone);
+  auto& id_j = String::Handle(zone);
+  auto& fn_i = Function::Handle(zone);
+  auto& fn_j = Function::Handle(zone);
+  auto& abi_ij = String::Handle(zone);
+  bool have_name_clash = false;
+  for (intptr_t i = 0; i < n && !have_name_clash; i++) {
+    EntryAt(thread, i, &id_i, &sel, &fn_i, &abi_ij);
+    if (fn_i.IsNull()) continue;
+    name_i = fn_i.name();
+    for (intptr_t j = i + 1; j < n; j++) {
+      EntryAt(thread, j, &id_j, &sel, &fn_j, &abi_ij);
+      if (fn_j.IsNull()) continue;
+      name_j = fn_j.name();
+      if (name_i.Equals(name_j) && !id_i.Equals(id_j)) {
+        have_name_clash = true;
+        break;
+      }
+    }
+  }
+  // NOT here: this is inside the arms array, and a property emitted between
+  // array elements produces JSON that no reader can parse. It is printed
+  // after the array closes.
+  if (have_name_clash) {
+    Kind k_i = kAot, k_j = kAot;
+    intptr_t v_i = 0, v_j = 0;
+    auto& impl_i = Function::Handle(zone);
+    auto& impl_j = Function::Handle(zone);
+    auto& a_i = String::Handle(zone);
+    auto& a_j = String::Handle(zone);
+    const bool got_i = LookupCurrent(thread, id_i, &k_i, &v_i, &impl_i, &a_i);
+    const bool got_j = LookupCurrent(thread, id_j, &k_j, &v_j, &impl_j, &a_j);
+    const bool l01 = got_i && got_j && impl_i.ptr() != impl_j.ptr() &&
+                     impl_i.ptr() == fn_i.ptr() && impl_j.ptr() == fn_j.ptr();
+    arm("L01",
+        "two declarations sharing a Function name resolve to their own "
+        "implementations, not to each other",
+        l01,
+        l01 ? "both resolved to their own Function"
+            : "one resolved to the other, or did not resolve");
+  } else {
+    arm("L01",
+        "two declarations sharing a Function name resolve to their own "
+        "implementations, not to each other",
+        false,
+        "NO SUCH PAIR IN THIS PROGRAM -- the arm could not run, which is not "
+        "the same as passing");
+  }
+
+  // X01 -- nothing has diverged in the normal state. Without this the next
+  // arm could pass because the check reports divergence unconditionally.
+  auto& diverged_id = String::Handle(zone);
+  const intptr_t diverged_before =
+      CountDivergedImplementations(thread, &diverged_id);
+  arm("X01", "no descriptor has diverged from its pinned implementation",
+      diverged_before == 0,
+      diverged_before == 0 ? "0 diverged"
+                           : diverged_id.ToCString());
+
+  // X02 -- a replacement that rewrites Function::CurrentCode() directly,
+  // leaving the registry untouched, must be DETECTABLE. This is the defect
+  // the issue names: "a replacement mutating a Function/Code object directly
+  // while registry state remains old". Nothing here executes the swapped
+  // code; the arm only proves the divergence cannot hide.
+  // Pick the subject FRESH. The arms above mutate state -- S04 promotes a
+  // staged replacement, so the entry that started out pointing at fn_a now
+  // points at fn_b, and swapping fn_a's code would change nothing that any
+  // descriptor is watching. An arm whose subject was chosen before the state
+  // moved tests the wrong object and reports "no defect found".
+  auto& swap_fn = Function::Handle(zone);
+  auto& other_fn = Function::Handle(zone);
+  auto& scratch_id = String::Handle(zone);
+  auto& scratch_abi = String::Handle(zone);
+  for (intptr_t i = 0; i < n && swap_fn.IsNull(); i++) {
+    EntryAt(thread, i, &scratch_id, &sel, &swap_fn, &scratch_abi);
+    if (swap_fn.IsNull() || !swap_fn.HasCode()) {
+      swap_fn = Function::null();
+      continue;
+    }
+    for (intptr_t j = 0; j < n; j++) {
+      EntryAt(thread, j, &scratch_id, &sel, &other_fn, &scratch_abi);
+      if (!other_fn.IsNull() && other_fn.HasCode() &&
+          other_fn.CurrentCode() != swap_fn.CurrentCode()) {
+        break;
+      }
+      other_fn = Function::null();
+    }
+    if (other_fn.IsNull()) swap_fn = Function::null();
+  }
+
+  if (!swap_fn.IsNull() && !other_fn.IsNull()) {
+    const auto& original = Code::Handle(zone, swap_fn.CurrentCode());
+    const auto& foreign = Code::Handle(zone, other_fn.CurrentCode());
+    swap_fn.AttachCode(foreign);
+    const intptr_t diverged_after =
+        CountDivergedImplementations(thread, &diverged_id);
+    // Put it back before anything else reads it: this is a diagnostic, and a
+    // self-test that leaves the program mutated is a worse defect than the
+    // one it is testing for.
+    swap_fn.AttachCode(original);
+    const intptr_t diverged_restored = CountDivergedImplementations(thread);
+    const bool x02 = diverged_after >= 1 && diverged_restored == 0;
+    arm("X02",
+        "code swapped underneath a descriptor is reported as diverged, and "
+        "restoring it clears the report",
+        x02,
+        x02 ? "diverged while swapped, 0 after restore"
+            : "divergence was not observed, or did not clear");
+  } else {
+    arm("X02",
+        "code swapped underneath a descriptor is reported as diverged, and "
+        "restoring it clears the report",
+        false,
+        "NO TWO CODE-BEARING ENTRIES -- the arm could not run, which is not "
+        "the same as passing");
+  }
+
   w.CloseArray();
+  w.PrintPropertyBool("found_name_clash_pair", have_name_clash);
 
   // --- measurements. Diagnostic only; no threshold is compared. ---
   w.OpenObject("measurements");
@@ -534,6 +719,8 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
 
   const intptr_t entries = Length(thread);
   writer.PrintProperty64("entry_count", entries);
+  writer.PrintProperty64("diverged_implementations",
+                         CountDivergedImplementations(thread));
   writer.PrintProperty64("selected_seen_at_materialization", maot_stat_selected);
   writer.PrintProperty64("retained_at_materialization", maot_stat_retained);
   writer.PrintProperty64("dropped_at_materialization", maot_stat_dropped);
@@ -555,6 +742,23 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
     const intptr_t kind =
         Smi::Value(Smi::RawCast(FieldAt(thread, i, kCurrentKind)));
     writer.PrintProperty("kind", kind == kAot ? "AOT" : "PATCH_CODE");
+    // Whether a Code is pinned, and whether the Function still points at it.
+    // Not an address: an address is not identity, and #66 forbids using one
+    // as such. This is a yes/no plus a size, which is all any decision reads.
+    {
+      const auto& pinned = Object::Handle(zone, FieldAt(thread, i,
+                                                        kCurrentCode));
+      const auto& fn = Function::Handle(zone,
+          Function::RawCast(FieldAt(thread, i, kCurrentImpl)));
+      writer.PrintPropertyBool("implementation_code_pinned", !pinned.IsNull());
+      writer.PrintPropertyBool(
+          "pinned_code_is_current",
+          !pinned.IsNull() && !fn.IsNull() && fn.HasCode() &&
+              fn.CurrentCode() == Code::RawCast(pinned.ptr()));
+      writer.PrintProperty64(
+          "pinned_code_size",
+          pinned.IsNull() ? -1 : Code::Cast(pinned).Size());
+    }
     writer.PrintProperty64(
         "version", Smi::Value(Smi::RawCast(FieldAt(thread, i, kCurrentVersion))));
     // The implementation is described by its LOGICAL relationship, never by an

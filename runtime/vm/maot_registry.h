@@ -115,6 +115,22 @@ class MaotRegistry : public AllStatic {
 
   static void Clear(Thread* thread);
 
+  // How many entries' pinned Code no longer matches the Function's current
+  // Code. A replacement that rewrites Function::CurrentCode() directly leaves
+  // the registry describing an implementation that is no longer running, and
+  // "the registry still says AOT v1" is indistinguishable from correct state
+  // unless something actually compares the two. When `diverged_id` is given
+  // it receives the first such DeclarationId.
+  static intptr_t CountDivergedImplementations(Thread* thread,
+                                               String* diverged_id = nullptr);
+
+  // Re-reads entry `index`'s Code from its Function. Called once after
+  // ProgramVisitor::Dedup, because the Code a descriptor was materialized
+  // against may have been merged away by then -- and the descriptor is meant
+  // to name the implementation that actually ships. Returns whether the pin
+  // changed.
+  static bool RepinCurrentCode(Thread* thread, intptr_t index);
+
   // Recorded so the gate can compare sets, not just counts.
   static void SetMaterializationStats(intptr_t selected,
                                       intptr_t retained,
@@ -172,6 +188,12 @@ class MaotRegistry : public AllStatic {
     kCurrentKind,         // Smi
     kCurrentVersion,      // Smi
     kCurrentImpl,         // Function
+    // The Code the descriptor was materialized against. The issue's model
+    // asks for a "reference to executable implementation", and a Function is
+    // not that: Function::CurrentCode() is a mutable field, so a descriptor
+    // that only holds the Function silently follows whatever code is attached
+    // to it. Pinning the Code makes divergence observable.
+    kCurrentCode,         // Code, or null outside AOT
     kCurrentAbi,          // String
     kStagedKind,          // Smi, or -1 when nothing staged
     kStagedVersion,       // Smi
