@@ -102,7 +102,8 @@ class MaotRegistry : public AllStatic {
                        const Function& implementation,
                        const String& abi_descriptor,
                        const String& call_convention,
-                       const Array& dispatch_cell = Array::null_array());
+                       const Array& dispatch_cell = Array::null_array(),
+                       const String& implementation_id = String::null_string());
 
   // The final AOT calling-convention shape of `function`, rendered as a
   // canonical string. Derived from what compiler::ComputeCallingConvention
@@ -234,7 +235,9 @@ class MaotRegistry : public AllStatic {
                                const Function& implementation,
                                const String& abi_descriptor,
                                const String& call_convention,
-                               const String& patch_namespace);
+                               const String& patch_namespace,
+                               const String& implementation_id =
+                                   String::null_string());
 
   // Test-only: drops whatever is staged for `declaration_id` without
   // promoting it. The pairwise compatibility matrix in the self-test has to
@@ -320,6 +323,14 @@ class MaotRegistry : public AllStatic {
     // declaration. Compiler-path evidence: zero means every caller bound
     // somewhere else, whatever the program prints.
     kCallSiteCount,       // Smi
+    // WHICH declaration currently supplies the implementation, as a #65
+    // DeclarationId rather than a Function name. A name diagnostic is a
+    // spelling; two declarations can share one, and #66 spent an arm proving
+    // that. The install path knows the replacement's identity, so the
+    // descriptor records it.
+    kCurrentImplId,       // String
+    kReleaseImplId,       // String
+    kStagedImplId,        // String or null
     kStagedKind,          // Smi, or -1 when nothing staged
     kStagedVersion,       // Smi
     kStagedImpl,          // Function or null
