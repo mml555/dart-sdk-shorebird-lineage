@@ -37,6 +37,9 @@ DECLARE_FLAG(charp, maot_dump_registry);
 DECLARE_FLAG(charp, maot_namespace);
 DECLARE_FLAG(bool, maot_trace_registration);
 DECLARE_FLAG(bool, maot_disable_seeding);
+DECLARE_FLAG(charp, maot_selftest);
+DECLARE_FLAG(bool, maot_disable_constructor_seam);
+DECLARE_FLAG(bool, maot_materialize_unselected);
 DECLARE_FLAG(charp, maot_dump_registry_precompile);
 
 class MaotRegistry : public AllStatic {
@@ -58,7 +61,11 @@ class MaotRegistry : public AllStatic {
   // Refuses a duplicate declaration id: two runtime entities claiming one
   // identity means a later patch binds to the wrong one, so it is a hard
   // failure rather than a last-writer-wins.
-  static void Register(Thread* thread,
+  // Returns false on a duplicate declaration id. A bool rather than a FATAL
+  // so the gate can OBSERVE the refusal; the production caller still treats
+  // false as fatal, because two runtime entities claiming one identity means
+  // a later patch binds to the wrong one.
+  static bool Register(Thread* thread,
                        const String& declaration_id,
                        bool selected,
                        const Function& implementation,
@@ -122,12 +129,22 @@ class MaotRegistry : public AllStatic {
   // Stages a replacement WITHOUT making it current. Refuses when the ABI
   // descriptor differs from the current one: an incompatible replacement must
   // be rejected before any state changes, not after.
+  // `patch_namespace` is CONSUMED, not recorded: a patch built against a
+  // different release must be refused before anything is staged, or a
+  // same-spelling declaration from another release would be treated as this
+  // runtime entity.
   static bool StageReplacement(Thread* thread,
                                const String& declaration_id,
                                Kind kind,
                                intptr_t version,
                                const Function& implementation,
-                               const String& abi_descriptor);
+                               const String& abi_descriptor,
+                               const String& patch_namespace);
+
+  // Test-only: exercises staging, version, ABI, namespace, duplicate and
+  // missing semantics against the live registry and writes structured
+  // results. #66 needs the state primitive proven; #71 owns real transactions.
+  static void RunSelfTest(Thread* thread, const char* path);
 
   static bool HasStaged(Thread* thread, const String& declaration_id);
 

@@ -724,6 +724,29 @@ void Precompiler::DoCompileAll() {
         TraceForRetainedFunctions();
       }
 
+      // MUTABLE-AOT (#66): reduce the registry to its final contents HERE,
+      // before anything is dropped.
+      //
+      // Kernel loading registers every declaration it sees, selected or not,
+      // so before this call the registry is an ObjectStore root holding
+      // Functions the precompiler is about to remove. Those references do not
+      // make the Functions retained -- DropFunctions rebuilds each class's
+      // function array from functions_to_retain_ -- but they do keep the
+      // objects reachable, so the Class survives the collection inside
+      // DropClasses after its cid has been invalidated and the serializer
+      // then aborts with "Class with illegal cid". A release with NO selected
+      // declarations at all hits this on any class the optimizer fully
+      // dissolves, which is the common case for an app that has not adopted
+      // the pragma.
+      //
+      // Every input this needs is final at this point: selection came from
+      // the kernel metadata, retention is functions_to_retain_, and code
+      // attachment finished with the compilation loop above. Running it here
+      // makes the earlier comment's intent true rather than aspirational --
+      // afterwards the registry references only Functions that are being
+      // kept, so it can no longer resurrect anything.
+      MaterializeMutableAotRegistry();
+
       FinalizeDispatchTable();
       ReplaceFunctionStaticCallEntries();
 
@@ -765,12 +788,6 @@ void Precompiler::DoCompileAll() {
       DropClasses();
       DropLibraries();
     }
-
-    // MUTABLE-AOT (#66): rebuild the registry from the RETAINED set, after
-    // dropping. Chosen over the earlier seam deliberately: the final registry
-    // should describe the final AOT program, not influence pruning by being
-    // reachable during it.
-    MaterializeMutableAotRegistry();
 
     {
       PRECOMPILER_TIMER_SCOPE(this, Obfuscate);
@@ -1613,6 +1630,7 @@ void Precompiler::MaterializeMutableAotRegistry() {
   GrowableArray<const String*> keep_ids;
   GrowableArray<const Function*> keep_fns;
   GrowableArray<const String*> keep_abis;
+  GrowableArray<bool> keep_selected;
   intptr_t selected_seen = 0;
   intptr_t dropped = 0;
 
@@ -1622,8 +1640,8 @@ void Precompiler::MaterializeMutableAotRegistry() {
     auto& fn = Function::Handle(Z);
     bool selected = false;
     MaotRegistry::EntryAt(T, i, &id, &selected, &fn, &abi);
-    if (!selected) continue;
-    selected_seen++;
+    if (!selected && !FLAG_maot_materialize_unselected) continue;
+    if (selected) selected_seen++;
     if (FLAG_maot_trace_registration) {
       OS::PrintErr("[maot] materialize %s retained=%d hascode=%d\n",
                    id.ToCString(),
@@ -1648,12 +1666,17 @@ void Precompiler::MaterializeMutableAotRegistry() {
     keep_ids.Add(&String::ZoneHandle(Z, id.ptr()));
     keep_fns.Add(&Function::ZoneHandle(Z, fn.ptr()));
     keep_abis.Add(&String::ZoneHandle(Z, abi.ptr()));
+    // Carry the real flag through. Rewriting it to true would make the
+    // --maot_materialize_unselected falsification unable to show the defect it
+    // exists to show: an unselected declaration holding an authoritative slot.
+    keep_selected.Add(selected);
   }
 
   MaotRegistry::Clear(T);
   for (intptr_t i = 0; i < keep_ids.length(); i++) {
-    MaotRegistry::Register(T, *keep_ids[i], /*selected=*/true, *keep_fns[i],
-                           *keep_abis[i]);
+    const bool ok = MaotRegistry::Register(T, *keep_ids[i], keep_selected[i],
+                                          *keep_fns[i], *keep_abis[i]);
+    ASSERT(ok);
   }
   MaotRegistry::SetMaterializationStats(selected_seen, keep_ids.length(),
                                         dropped);

@@ -1572,8 +1572,10 @@ void KernelLoader::FinishClassLoading(const Class& klass,
                          *owner, constructor_helper.start_position_));
     function.set_end_token_pos(constructor_helper.end_position_);
     function.set_kernel_offset(constructor_offset);
-    BindMaotDeclaration(constructor_offset + library_kernel_offset_, function,
-                        "constructor");
+    if (!FLAG_maot_disable_constructor_seam) {
+      BindMaotDeclaration(constructor_offset + library_kernel_offset_,
+                          function, "constructor");
+    }
     signature.set_result_type(T.ReceiverType(klass));
     function.set_has_pragma(HasPragma::decode(pragma_bits));
     function.set_is_visible(!InvisibleFunctionPragma::decode(pragma_bits));
@@ -1814,7 +1816,9 @@ void KernelLoader::BindMaotDeclaration(intptr_t kernel_node_offset,
   if (!md.has_value) return;
   const String& id = H.DartSymbolPlain(md.declaration_id);
   const String& abi = H.DartSymbolPlain(md.abi_canonical);
-  MaotRegistry::Register(thread_, id, md.selected, function, abi);
+  if (!MaotRegistry::Register(thread_, id, md.selected, function, abi)) {
+    FATAL("MaotRegistry: duplicate declaration id '%s'", id.ToCString());
+  }
 }
 
 void KernelLoader::LoadProcedure(const Library& library,

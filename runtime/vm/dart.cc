@@ -1026,6 +1026,9 @@ ErrorPtr Dart::InitializeIsolate(Thread* T,
   if (FLAG_maot_dump_registry != nullptr) {
     MaotRegistry::DumpToFile(T, FLAG_maot_dump_registry);
   }
+  if (FLAG_maot_selftest != nullptr) {
+    MaotRegistry::RunSelfTest(T, FLAG_maot_selftest);
+  }
 
 #if !defined(PRODUCT)
   if (Isolate::IsSystemIsolate(I)) {
