@@ -23,9 +23,32 @@
 // expected to replace the storage and the transaction model, and it should be
 // able to do that without rewriting every caller.
 //
-// A Function REFERENCE is the implementation payload. That is not the same as
-// using a Function's ADDRESS as identity -- the identity is always the
-// DeclarationId string.
+// THE DESCRIPTOR IS NOT A FUNCTION. An earlier version of this comment said "a
+// Function reference is the implementation payload", and that turned out to be
+// the bug rather than the design:
+//
+//   DeclarationId            the identity, always, and the only key
+//     -> descriptor
+//          -> Function       the declaration/runtime-function relationship
+//          -> pinned Code    the executable implementation actually shipped
+//          -> ABI            Kernel/source-call shape, from the compiler
+//          -> call convention  final AOT shape, from the precompiler
+//
+// Function::CurrentCode() is a mutable field, so a descriptor that held only
+// the Function followed whatever code was later attached to it and could never
+// report that it had been bypassed. The pinned Code is what makes divergence
+// observable. None of this uses an ADDRESS as identity: the identity is the
+// DeclarationId string, and the Code is compared for object equality against
+// what the Function points at, never parsed for a location.
+//
+// TWO ABI COMPONENTS, because they are known at different times. The
+// Kernel/source-call shape (parameter counts, named sets, type-parameter
+// bounds) is known to the front end and rides in as metadata. The final AOT
+// calling convention (how many arguments go in registers, and whether each is
+// tagged, unboxed int64 or unboxed double) is decided by the VM precompiler
+// and does not exist until then -- and `unboxed_parameters_info_` is compiled
+// out of DART_PRECOMPILED_RUNTIME entirely, so it cannot be recovered from the
+// Function at run time. It is captured at materialization and stored as data.
 
 #include "vm/allocation.h"
 #include "vm/flags.h"
@@ -65,11 +88,22 @@ class MaotRegistry : public AllStatic {
   // so the gate can OBSERVE the refusal; the production caller still treats
   // false as fatal, because two runtime entities claiming one identity means
   // a later patch binds to the wrong one.
+  // `call_convention` may be empty at kernel-load time: the precompiler has
+  // not decided unboxing yet. It is filled in at materialization, which is the
+  // first moment the answer exists.
   static bool Register(Thread* thread,
                        const String& declaration_id,
                        bool selected,
                        const Function& implementation,
-                       const String& abi_descriptor);
+                       const String& abi_descriptor,
+                       const String& call_convention);
+
+  // The final AOT calling-convention shape of `function`, rendered as a
+  // canonical string. Derived from what compiler::ComputeCallingConvention
+  // actually consumes for a target -- see the implementation for the argument
+  // that this set is complete rather than merely plausible.
+  static StringPtr ComputeCallConvention(Thread* thread,
+                                         const Function& function);
 
   // The release namespace this registry belongs to (#65 namespace identity).
   // Without it, a declaration spelled the same in a different release would be
@@ -111,7 +145,8 @@ class MaotRegistry : public AllStatic {
                       String* declaration_id,
                       bool* selected,
                       Function* implementation,
-                      String* abi_descriptor);
+                      String* abi_descriptor,
+                      String* call_convention = nullptr);
 
   static void Clear(Thread* thread);
 
@@ -155,7 +190,25 @@ class MaotRegistry : public AllStatic {
                                intptr_t version,
                                const Function& implementation,
                                const String& abi_descriptor,
+                               const String& call_convention,
                                const String& patch_namespace);
+
+  // Test-only: drops whatever is staged for `declaration_id` without
+  // promoting it. The pairwise compatibility matrix in the self-test has to
+  // attempt a real StageReplacement for every ordered pair -- a separate
+  // "would this be accepted" predicate would be a second code path, and the
+  // one that matters is the one production uses.
+  static void AbandonStagedForTesting(Thread* thread,
+                                      const String& declaration_id);
+
+  // TEST-ONLY, AND DELIBERATELY WRONG. Resolves by the implementation
+  // Function's NAME instead of by DeclarationId -- the exact defect the gate
+  // has to be able to catch. Production lookup is IndexOf(), which is keyed on
+  // the DeclarationId string and never on a name; this exists so the gate can
+  // inject the name-keyed resolver against the real registry and show that the
+  // resulting aliasing is refused. Returns the index it lands on, or -1.
+  static intptr_t LookupByFunctionNameForFalsification(Thread* thread,
+                                                       const String& name);
 
   // Test-only: exercises staging, version, ABI, namespace, duplicate and
   // missing semantics against the live registry and writes structured
@@ -194,11 +247,13 @@ class MaotRegistry : public AllStatic {
     // that only holds the Function silently follows whatever code is attached
     // to it. Pinning the Code makes divergence observable.
     kCurrentCode,         // Code, or null outside AOT
-    kCurrentAbi,          // String
+    kCurrentAbi,          // String -- Kernel/source-call shape
+    kCurrentCallConv,     // String -- final AOT calling-convention shape
     kStagedKind,          // Smi, or -1 when nothing staged
     kStagedVersion,       // Smi
     kStagedImpl,          // Function or null
     kStagedAbi,           // String or null
+    kStagedCallConv,      // String or null
     kEntrySize
   };
 

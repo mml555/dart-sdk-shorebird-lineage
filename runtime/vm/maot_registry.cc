@@ -4,11 +4,14 @@
 
 #include "vm/maot_registry.h"
 
+#include <cstring>
+
 #include "vm/dart_api_state.h"
 #include "vm/flags.h"
 #include "vm/isolate.h"
 #include "vm/json_writer.h"
 #include "vm/object_store.h"
+#include "vm/symbols.h"
 #include "vm/thread.h"
 #include "vm/zone_text_buffer.h"
 
@@ -124,11 +127,15 @@ void MaotRegistry::EntryAt(Thread* thread,
                            String* declaration_id,
                            bool* selected,
                            Function* implementation,
-                           String* abi_descriptor) {
+                           String* abi_descriptor,
+                           String* call_convention) {
   *declaration_id = String::RawCast(FieldAt(thread, index, kDeclarationId));
   *selected = Smi::Value(Smi::RawCast(FieldAt(thread, index, kSelected))) == 1;
   *implementation = Function::RawCast(FieldAt(thread, index, kCurrentImpl));
   *abi_descriptor = String::RawCast(FieldAt(thread, index, kCurrentAbi));
+  if (call_convention != nullptr) {
+    *call_convention = String::RawCast(FieldAt(thread, index, kCurrentCallConv));
+  }
 }
 
 void MaotRegistry::Clear(Thread* thread) {
@@ -169,7 +176,8 @@ bool MaotRegistry::Register(Thread* thread,
                             const String& declaration_id,
                             bool selected,
                             const Function& implementation,
-                            const String& abi_descriptor) {
+                            const String& abi_descriptor,
+                            const String& call_convention) {
   Zone* zone = thread->zone();
   if (IndexOf(thread, declaration_id) >= 0) {
     return false;  // duplicate: the caller decides how loudly to fail
@@ -194,11 +202,113 @@ bool MaotRegistry::Register(Thread* thread,
                   : Object::Handle(zone, implementation.CurrentCode()),
               Heap::kOld);
   storage.Add(abi_descriptor, Heap::kOld);
+  storage.Add(call_convention, Heap::kOld);
   storage.Add(Smi::Handle(zone, Smi::New(-1)), Heap::kOld);  // staged kind
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // staged version
   storage.Add(Object::null_object(), Heap::kOld);            // staged impl
   storage.Add(Object::null_object(), Heap::kOld);            // staged abi
+  storage.Add(Object::null_object(), Heap::kOld);            // staged callconv
   return true;
+}
+
+StringPtr MaotRegistry::ComputeCallConvention(Thread* thread,
+                                              const Function& function) {
+#if defined(DART_PRECOMPILED_RUNTIME)
+  // Unreachable by construction: this is called from the precompiler. The
+  // inputs below do not exist in this build -- untagged Function drops
+  // unboxed_parameters_info_ entirely and every accessor returns false -- so
+  // computing it here would silently produce "everything is tagged".
+  UNREACHABLE();
+  return String::null();
+#else
+  Zone* zone = thread->zone();
+  if (function.IsNull()) return Symbols::Empty().ptr();
+
+  // WHY THESE FIELDS AND NOT OTHERS.
+  //
+  // compiler::ComputeCallingConvention (dart_calling_conventions.cc) decides
+  // where each argument goes from exactly three things about the TARGET:
+  //
+  //   1. argc, which for a static target is num_fixed_parameters();
+  //   2. the Representation of each argument, which FlowGraph derives from
+  //      ParameterRepresentationAt()/ReturnRepresentationOf(), i.e. from the
+  //      function's unboxing bitmap;
+  //   3. MaxNumberOfParametersInRegisters(), the register/stack split.
+  //
+  // Recording (3) as its OUTPUT rather than its inputs is deliberate, and it
+  // is sufficient rather than merely convenient: IsGeneric(), the function
+  // kind, must_use_stack_calling_convention and
+  // has_overrides_with_less_direct_parameters are all inputs whose only effect
+  // is the number this returns. Two functions that differ in those flags but
+  // agree on this number cannot be distinguished by the calling convention,
+  // and two that disagree on the number always can.
+  //
+  // IsFactory() is included because ComputeLocationsOfFixedParameters shifts
+  // the parameter index by one for factories, so the same shape maps to
+  // different locations. (memberKind already separates a factory in the Kernel
+  // descriptor; it is repeated here because this string has to stand on its
+  // own as a calling-convention fingerprint.)
+  auto append_rep = [](ZoneTextBuffer* out, const Function& fn, intptr_t i) {
+    if (fn.is_unboxed_integer_parameter_at(i)) {
+      out->AddString("i");
+    } else if (fn.is_unboxed_double_parameter_at(i)) {
+      out->AddString("d");
+    } else {
+      out->AddString("t");
+    }
+  };
+
+  ZoneTextBuffer buffer(zone);
+  buffer.Printf("cc1;fixed%" Pd ";regs%" Pd ";%s;args",
+                function.num_fixed_parameters(),
+                function.MaxNumberOfParametersInRegisters(zone),
+                function.IsFactory() ? "factory" : "nofactory");
+  for (intptr_t i = 0; i < function.num_fixed_parameters(); i++) {
+    append_rep(&buffer, function, i);
+  }
+  buffer.AddString(";ret");
+  if (function.has_unboxed_integer_return()) {
+    buffer.AddString("i");
+  } else if (function.has_unboxed_double_return()) {
+    buffer.AddString("d");
+  } else if (function.has_unboxed_record_return()) {
+    buffer.AddString("p");  // kPairOfTagged
+  } else {
+    buffer.AddString("t");
+  }
+  return String::New(buffer.buffer(), Heap::kOld);
+#endif
+}
+
+void MaotRegistry::AbandonStagedForTesting(Thread* thread,
+                                           const String& declaration_id) {
+  Zone* zone = thread->zone();
+  const intptr_t entry = IndexOf(thread, declaration_id);
+  if (entry < 0) return;
+  SetFieldAt(thread, entry, kStagedKind, Smi::Handle(zone, Smi::New(-1)));
+  SetFieldAt(thread, entry, kStagedVersion, Smi::Handle(zone, Smi::New(0)));
+  SetFieldAt(thread, entry, kStagedImpl, Object::null_object());
+  SetFieldAt(thread, entry, kStagedAbi, Object::null_object());
+  SetFieldAt(thread, entry, kStagedCallConv, Object::null_object());
+}
+
+intptr_t MaotRegistry::LookupByFunctionNameForFalsification(
+    Thread* thread,
+    const String& name) {
+  Zone* zone = thread->zone();
+  const intptr_t entries = Length(thread);
+  auto& fn = Function::Handle(zone);
+  auto& candidate = String::Handle(zone);
+  for (intptr_t i = 0; i < entries; i++) {
+    fn ^= FieldAt(thread, i, kCurrentImpl);
+    if (fn.IsNull()) continue;
+    candidate = fn.name();
+    // FIRST MATCH WINS -- which is the whole defect. Two declarations that
+    // share a Function name are indistinguishable to this resolver, so one of
+    // them silently answers for the other.
+    if (candidate.Equals(name)) return i;
+  }
+  return -1;
 }
 
 bool MaotRegistry::RepinCurrentCode(Thread* thread, intptr_t index) {
@@ -290,6 +400,7 @@ bool MaotRegistry::StageReplacement(Thread* thread,
                                     intptr_t version,
                                     const Function& implementation,
                                     const String& abi_descriptor,
+                                    const String& call_convention,
                                     const String& patch_namespace) {
   const intptr_t entry = IndexOf(thread, declaration_id);
   if (entry < 0) return false;  // missing id is refused, never created
@@ -300,9 +411,31 @@ bool MaotRegistry::StageReplacement(Thread* thread,
   if (ns.IsNull() || !ns.Equals(patch_namespace)) return false;
   // ABI compatibility is decided BEFORE anything changes. An incompatible
   // replacement must never leave the entry half-updated.
+  //
+  // BOTH components, because they answer different questions. The Kernel
+  // descriptor says whether the call is the same call -- parameter shape,
+  // named set, type-parameter bounds. The calling convention says whether the
+  // machine-level handover is the same -- how many arguments arrive in
+  // registers, and whether each is tagged, unboxed int64 or unboxed double.
+  // A body can match one and not the other, and either mismatch is fatal:
+  // callers were compiled against both.
   const auto& current_abi =
       String::Handle(zone, String::RawCast(FieldAt(thread, entry, kCurrentAbi)));
   if (!current_abi.Equals(abi_descriptor)) {
+    return false;
+  }
+  // A shape the front end could not represent cannot be certified compatible
+  // with anything, including an identical spelling of itself: equality of two
+  // "unrepresentable" tokens says the renderer failed twice, not that the
+  // shapes agree.
+  if (current_abi.ToCString() != nullptr &&
+      strstr(current_abi.ToCString(), "unrepresentable:") != nullptr) {
+    return false;
+  }
+  const auto& current_cc = String::Handle(
+      zone, String::RawCast(FieldAt(thread, entry, kCurrentCallConv)));
+  if (current_cc.IsNull() != call_convention.IsNull() ||
+      (!current_cc.IsNull() && !current_cc.Equals(call_convention))) {
     return false;
   }
   const intptr_t current_version =
@@ -317,6 +450,7 @@ bool MaotRegistry::StageReplacement(Thread* thread,
              Smi::Handle(zone, Smi::New(version)));
   SetFieldAt(thread, entry, kStagedImpl, implementation);
   SetFieldAt(thread, entry, kStagedAbi, abi_descriptor);
+  SetFieldAt(thread, entry, kStagedCallConv, call_convention);
   return true;
 }
 
@@ -367,11 +501,14 @@ bool MaotRegistry::CommitStagedForTesting(Thread* thread,
                  : Object::Handle(zone, staged_fn.CurrentCode()));
   SetFieldAt(thread, entry, kCurrentAbi,
              Object::Handle(zone, FieldAt(thread, entry, kStagedAbi)));
+  SetFieldAt(thread, entry, kCurrentCallConv,
+             Object::Handle(zone, FieldAt(thread, entry, kStagedCallConv)));
 
   SetFieldAt(thread, entry, kStagedKind, Smi::Handle(zone, Smi::New(-1)));
   SetFieldAt(thread, entry, kStagedVersion, Smi::Handle(zone, Smi::New(0)));
   SetFieldAt(thread, entry, kStagedImpl, Object::null_object());
   SetFieldAt(thread, entry, kStagedAbi, Object::null_object());
+  SetFieldAt(thread, entry, kStagedCallConv, Object::null_object());
   return true;
 }
 
@@ -403,28 +540,41 @@ void MaotRegistry::RunSelfTest(Thread* thread, const char* path) {
   // rather than by hard-coding names.
   auto& id_a = String::Handle(zone);
   auto& abi_a = String::Handle(zone);
+  auto& cc_a = String::Handle(zone);
   auto& fn_a = Function::Handle(zone);
   auto& id_b = String::Handle(zone);
   auto& abi_b = String::Handle(zone);
+  auto& cc_b = String::Handle(zone);
   auto& fn_b = Function::Handle(zone);
   auto& id_x = String::Handle(zone);
   auto& abi_x = String::Handle(zone);
+  auto& cc_x = String::Handle(zone);
   auto& fn_x = Function::Handle(zone);
   bool sel = false;
   bool have_pair = false, have_mismatch = false;
 
+  // "Compatible" now means BOTH components agree. A pair that matched only on
+  // the Kernel shape would make the positive staging arms fail for a correct
+  // reason, which is the same as not having them.
+  auto compatible = [](const String& abi1, const String& cc1,
+                       const String& abi2, const String& cc2) {
+    if (!abi1.Equals(abi2)) return false;
+    if (cc1.IsNull() != cc2.IsNull()) return false;
+    return cc1.IsNull() || cc1.Equals(cc2);
+  };
+
   for (intptr_t i = 0; i < n && !have_pair; i++) {
-    EntryAt(thread, i, &id_a, &sel, &fn_a, &abi_a);
+    EntryAt(thread, i, &id_a, &sel, &fn_a, &abi_a, &cc_a);
     for (intptr_t j = 0; j < n; j++) {
       if (i == j) continue;
-      EntryAt(thread, j, &id_b, &sel, &fn_b, &abi_b);
-      if (abi_a.Equals(abi_b)) { have_pair = true; break; }
+      EntryAt(thread, j, &id_b, &sel, &fn_b, &abi_b, &cc_b);
+      if (compatible(abi_a, cc_a, abi_b, cc_b)) { have_pair = true; break; }
     }
-    if (!have_pair) EntryAt(thread, i, &id_a, &sel, &fn_a, &abi_a);
+    if (!have_pair) EntryAt(thread, i, &id_a, &sel, &fn_a, &abi_a, &cc_a);
   }
   for (intptr_t i = 0; i < n && have_pair && !have_mismatch; i++) {
-    EntryAt(thread, i, &id_x, &sel, &fn_x, &abi_x);
-    if (!abi_x.Equals(abi_a)) have_mismatch = true;
+    EntryAt(thread, i, &id_x, &sel, &fn_x, &abi_x, &cc_x);
+    if (!compatible(abi_a, cc_a, abi_x, cc_x)) have_mismatch = true;
   }
 
   w.PrintPropertyBool("found_same_abi_pair", have_pair);
@@ -442,98 +592,13 @@ void MaotRegistry::RunSelfTest(Thread* thread, const char* path) {
 
   w.OpenArray("arms");
 
-  Kind kind = kAot;
-  intptr_t version = 0;
-  auto& impl = Function::Handle(zone);
-  auto& abi = String::Handle(zone);
-
-  if (have_pair) {
-    // S01 -- the initial descriptor is the release implementation.
-    bool found = LookupCurrent(thread, id_a, &kind, &version, &impl, &abi);
-    const bool s01 = found && kind == kAot && version == 1 && !impl.IsNull();
-    arm("S01", "current is AOT v1 with an implementation", s01,
-        s01 ? "AOT v1 present" : "not as expected");
-
-    // S02 -- staging must not be visible through the current lookup.
-    const bool staged_ok = StageReplacement(thread, id_a, kPatchCode, 2, fn_b,
-                                            abi_a, ns);
-    LookupCurrent(thread, id_a, &kind, &version, &impl, &abi);
-    const bool s02 = staged_ok && kind == kAot && version == 1;
-    arm("S02", "stage PATCH_CODE v2; current still AOT v1", s02,
-        staged_ok ? (s02 ? "staged, current unchanged"
-                         : "staged but current CHANGED")
-                  : "staging refused");
-    arm("S03", "HasStaged reports the pending replacement",
-        HasStaged(thread, id_a), HasStaged(thread, id_a) ? "true" : "false");
-
-    // V01 -- a replacement must advance the version.
-    const bool v01 = !StageReplacement(thread, id_a, kPatchCode, 1, fn_b,
-                                       abi_a, ns);
-    arm("V01", "staging at or below the current version is refused", v01,
-        v01 ? "refused" : "ACCEPTED");
-
-    // A01 -- an incompatible ABI is refused BEFORE anything changes.
-    if (have_mismatch) {
-      const bool a01 = !StageReplacement(thread, id_a, kPatchCode, 3, fn_x,
-                                         abi_x, ns);
-      LookupCurrent(thread, id_a, &kind, &version, &impl, &abi);
-      arm("A01", "ABI mismatch refused, current untouched",
-          a01 && kind == kAot && version == 1,
-          a01 ? "refused" : "ACCEPTED");
-    }
-
-    // N01 -- a patch from another release is refused.
-    const auto& wrong_ns =
-        String::Handle(zone, String::New("0000000000000000", Heap::kOld));
-    const bool n01 =
-        !StageReplacement(thread, id_a, kPatchCode, 3, fn_b, abi_a, wrong_ns);
-    arm("N01", "wrong release namespace refused", n01,
-        n01 ? "refused" : "ACCEPTED");
-
-    // S04 -- the explicit test-only mutation makes the staged one current.
-    const bool committed = CommitStagedForTesting(thread, id_a);
-    LookupCurrent(thread, id_a, &kind, &version, &impl, &abi);
-    const bool s04 = committed && kind == kPatchCode && version == 2;
-    arm("S04", "commit promotes staged to current", s04,
-        committed ? (s04 ? "current is PATCH_CODE v2" : "commit did not apply")
-                  : "commit refused");
-
-    // V02 -- nothing staged means nothing to commit.
-    const bool v02 = !CommitStagedForTesting(thread, id_a);
-    arm("V02", "commit with nothing staged is refused", v02,
-        v02 ? "refused" : "ACCEPTED");
-
-    // V03 -- a version bump that changes no implementation is not a
-    // replacement.
-    LookupCurrent(thread, id_a, &kind, &version, &impl, &abi);
-    StageReplacement(thread, id_a, kPatchCode, version + 1, impl, abi, ns);
-    const bool v03 = !CommitStagedForTesting(thread, id_a);
-    arm("V03", "version bump with the same implementation is refused", v03,
-        v03 ? "refused" : "ACCEPTED");
-  }
-
-  // M01/M02 -- an unknown declaration is refused, never implicitly created.
-  const auto& unknown =
-      String::Handle(zone, String::New("lib:package:none/x.dart::fn:absent",
-                                       Heap::kOld));
-  const bool m01 = !LookupCurrent(thread, unknown, nullptr, nullptr, nullptr,
-                                  nullptr);
-  arm("M01", "lookup of an unknown id is refused", m01,
-      m01 ? "refused" : "FOUND");
-  const bool m02 =
-      !StageReplacement(thread, unknown, kPatchCode, 2, fn_a, abi_a, ns);
-  const bool m02b = IndexOf(thread, unknown) < 0;
-  arm("M02", "staging an unknown id refuses and creates nothing",
-      m02 && m02b, (m02 && m02b) ? "refused, not created" : "created or accepted");
-
-  // D01 -- a duplicate registration is refused.
-  const bool d01 = have_pair ? !Register(thread, id_a, true, fn_a, abi_a) : false;
-  arm("D01", "duplicate registration is refused", d01,
-      d01 ? "refused" : "ACCEPTED");
-
-  // A01' -- the same declaration id spelled from a different release is a
-  // different entity. Covered by N01; kept adjacent for readability.
-
+  // L01 RUNS FIRST, before anything below mutates state. S04 deliberately
+  // commits one entry's implementation onto another entry's slot, which
+  // creates a genuine alias -- so an L01 placed after it measures the
+  // test's own mutation and reports a defect that is not there. This is the
+  // second arm in this file to have chosen its subject before the state
+  // moved; both times the implementation was right and the measurement was
+  // stale.
   // L01 -- two declarations that share a VM Function NAME but differ in
   // DeclarationId must not resolve to one another. The issue asks the gate to
   // catch "lookup that accidentally succeeds by function name while
@@ -590,6 +655,103 @@ void MaotRegistry::RunSelfTest(Thread* thread, const char* path) {
         "NO SUCH PAIR IN THIS PROGRAM -- the arm could not run, which is not "
         "the same as passing");
   }
+
+
+
+  Kind kind = kAot;
+  intptr_t version = 0;
+  auto& impl = Function::Handle(zone);
+  auto& abi = String::Handle(zone);
+
+  if (have_pair) {
+    // S01 -- the initial descriptor is the release implementation.
+    bool found = LookupCurrent(thread, id_a, &kind, &version, &impl, &abi);
+    const bool s01 = found && kind == kAot && version == 1 && !impl.IsNull();
+    arm("S01", "current is AOT v1 with an implementation", s01,
+        s01 ? "AOT v1 present" : "not as expected");
+
+    // S02 -- staging must not be visible through the current lookup.
+    const bool staged_ok = StageReplacement(thread, id_a, kPatchCode, 2, fn_b,
+                                            abi_a, cc_a, ns);
+    LookupCurrent(thread, id_a, &kind, &version, &impl, &abi);
+    const bool s02 = staged_ok && kind == kAot && version == 1;
+    arm("S02", "stage PATCH_CODE v2; current still AOT v1", s02,
+        staged_ok ? (s02 ? "staged, current unchanged"
+                         : "staged but current CHANGED")
+                  : "staging refused");
+    arm("S03", "HasStaged reports the pending replacement",
+        HasStaged(thread, id_a), HasStaged(thread, id_a) ? "true" : "false");
+
+    // V01 -- a replacement must advance the version.
+    const bool v01 = !StageReplacement(thread, id_a, kPatchCode, 1, fn_b,
+                                       abi_a, cc_a, ns);
+    arm("V01", "staging at or below the current version is refused", v01,
+        v01 ? "refused" : "ACCEPTED");
+
+    // A01 -- an incompatible ABI is refused BEFORE anything changes.
+    if (have_mismatch) {
+      const bool a01 = !StageReplacement(thread, id_a, kPatchCode, 3, fn_x,
+                                         abi_x, cc_x, ns);
+      LookupCurrent(thread, id_a, &kind, &version, &impl, &abi);
+      arm("A01", "ABI mismatch refused, current untouched",
+          a01 && kind == kAot && version == 1,
+          a01 ? "refused" : "ACCEPTED");
+    }
+
+    // N01 -- a patch from another release is refused.
+    const auto& wrong_ns =
+        String::Handle(zone, String::New("0000000000000000", Heap::kOld));
+    const bool n01 =
+        !StageReplacement(thread, id_a, kPatchCode, 3, fn_b, abi_a, cc_a,
+                          wrong_ns);
+    arm("N01", "wrong release namespace refused", n01,
+        n01 ? "refused" : "ACCEPTED");
+
+    // S04 -- the explicit test-only mutation makes the staged one current.
+    const bool committed = CommitStagedForTesting(thread, id_a);
+    LookupCurrent(thread, id_a, &kind, &version, &impl, &abi);
+    const bool s04 = committed && kind == kPatchCode && version == 2;
+    arm("S04", "commit promotes staged to current", s04,
+        committed ? (s04 ? "current is PATCH_CODE v2" : "commit did not apply")
+                  : "commit refused");
+
+    // V02 -- nothing staged means nothing to commit.
+    const bool v02 = !CommitStagedForTesting(thread, id_a);
+    arm("V02", "commit with nothing staged is refused", v02,
+        v02 ? "refused" : "ACCEPTED");
+
+    // V03 -- a version bump that changes no implementation is not a
+    // replacement.
+    LookupCurrent(thread, id_a, &kind, &version, &impl, &abi);
+    StageReplacement(thread, id_a, kPatchCode, version + 1, impl, abi,
+                     cc_a, ns);
+    const bool v03 = !CommitStagedForTesting(thread, id_a);
+    arm("V03", "version bump with the same implementation is refused", v03,
+        v03 ? "refused" : "ACCEPTED");
+  }
+
+  // M01/M02 -- an unknown declaration is refused, never implicitly created.
+  const auto& unknown =
+      String::Handle(zone, String::New("lib:package:none/x.dart::fn:absent",
+                                       Heap::kOld));
+  const bool m01 = !LookupCurrent(thread, unknown, nullptr, nullptr, nullptr,
+                                  nullptr);
+  arm("M01", "lookup of an unknown id is refused", m01,
+      m01 ? "refused" : "FOUND");
+  const bool m02 =
+      !StageReplacement(thread, unknown, kPatchCode, 2, fn_a, abi_a, cc_a,
+                        ns);
+  const bool m02b = IndexOf(thread, unknown) < 0;
+  arm("M02", "staging an unknown id refuses and creates nothing",
+      m02 && m02b, (m02 && m02b) ? "refused, not created" : "created or accepted");
+
+  // D01 -- a duplicate registration is refused.
+  const bool d01 = have_pair ? !Register(thread, id_a, true, fn_a, abi_a, cc_a) : false;
+  arm("D01", "duplicate registration is refused", d01,
+      d01 ? "refused" : "ACCEPTED");
+
+  // A01' -- the same declaration id spelled from a different release is a
+  // different entity. Covered by N01; kept adjacent for readability.
 
   // X01 -- nothing has diverged in the normal state. Without this the next
   // arm could pass because the check reports divergence unconditionally.
@@ -661,6 +823,111 @@ void MaotRegistry::RunSelfTest(Thread* thread, const char* path) {
 
   w.CloseArray();
   w.PrintPropertyBool("found_name_clash_pair", have_name_clash);
+
+  // ---- pairwise compatibility matrix -------------------------------------
+  //
+  // For every ordered pair, attempt a REAL StageReplacement of j's
+  // implementation onto i's slot. The requirement the gate checks is an
+  // equivalence, not an implication:
+  //
+  //     accepted  <=>  (abi_i == abi_j  AND  callconv_i == callconv_j)
+  //
+  // That is what makes this a discrimination rather than a smoke test. A
+  // descriptor missing a dimension shows up as a pair that differs in that
+  // dimension and is nevertheless ACCEPTED; a descriptor with a spurious
+  // dimension shows up as an identical pair that is REFUSED.
+  //
+  // It stages for real and then abandons, rather than asking a separate
+  // "would this be accepted" predicate, because a predicate would be a second
+  // code path and the one that matters is the one production uses.
+  w.OpenArray("compatibility_matrix");
+  {
+    auto& id_i2 = String::Handle(zone);
+    auto& abi_i2 = String::Handle(zone);
+    auto& cc_i2 = String::Handle(zone);
+    auto& fn_i2 = Function::Handle(zone);
+    auto& id_j2 = String::Handle(zone);
+    auto& abi_j2 = String::Handle(zone);
+    auto& cc_j2 = String::Handle(zone);
+    auto& fn_j2 = Function::Handle(zone);
+    bool sel2 = false;
+    for (intptr_t i = 0; i < n; i++) {
+      EntryAt(thread, i, &id_i2, &sel2, &fn_i2, &abi_i2, &cc_i2);
+      Kind k_i = kAot;
+      intptr_t v_i = 0;
+      auto& impl_i2 = Function::Handle(zone);
+      auto& a_i2 = String::Handle(zone);
+      LookupCurrent(thread, id_i2, &k_i, &v_i, &impl_i2, &a_i2);
+      for (intptr_t j = 0; j < n; j++) {
+        if (i == j) continue;
+        EntryAt(thread, j, &id_j2, &sel2, &fn_j2, &abi_j2, &cc_j2);
+        if (fn_j2.IsNull()) continue;
+        const bool abi_same = abi_i2.Equals(abi_j2);
+        const bool cc_same = (cc_i2.IsNull() == cc_j2.IsNull()) &&
+                             (cc_i2.IsNull() || cc_i2.Equals(cc_j2));
+        const bool accepted = StageReplacement(thread, id_i2, kPatchCode,
+                                               v_i + 1, fn_j2, abi_j2, cc_j2,
+                                               ns);
+        if (accepted) AbandonStagedForTesting(thread, id_i2);
+        w.OpenObject();
+        w.PrintProperty("onto", id_i2.ToCString());
+        w.PrintProperty("from", id_j2.ToCString());
+        w.PrintPropertyBool("abi_equal", abi_same);
+        w.PrintPropertyBool("call_convention_equal", cc_same);
+        w.PrintPropertyBool("accepted", accepted);
+        w.CloseObject();
+      }
+    }
+  }
+  w.CloseArray();
+
+  // ---- resolution probes -------------------------------------------------
+  //
+  // Two resolvers run over the SAME registry: the production one, keyed on
+  // DeclarationId, and a deliberately name-keyed one that exists only here.
+  // The gate reads both. The first must always land on itself; the second is
+  // the injected defect, and the acceptance logic has to refuse the state it
+  // produces. Nothing below changes how production resolves anything.
+  w.OpenArray("resolution_probes");
+  {
+    auto& id_p = String::Handle(zone);
+    auto& abi_p = String::Handle(zone);
+    auto& fn_p = Function::Handle(zone);
+    auto& name_p = String::Handle(zone);
+    auto& landed = String::Handle(zone);
+    bool sel_p = false;
+    for (intptr_t i = 0; i < n; i++) {
+      EntryAt(thread, i, &id_p, &sel_p, &fn_p, &abi_p);
+      if (fn_p.IsNull()) continue;
+      name_p = fn_p.name();
+
+      const intptr_t by_id = IndexOf(thread, id_p);
+      landed = (by_id < 0)
+                   ? String::null()
+                   : String::RawCast(FieldAt(thread, by_id, kDeclarationId));
+      w.OpenObject();
+      w.PrintProperty("declaration_id", id_p.ToCString());
+      w.PrintProperty("function_name", name_p.ToCString());
+      w.PrintProperty("resolver", "declaration_id");
+      w.PrintProperty("resolved_to",
+                      landed.IsNull() ? "<unresolved>" : landed.ToCString());
+      w.CloseObject();
+
+      const intptr_t by_name =
+          LookupByFunctionNameForFalsification(thread, name_p);
+      landed = (by_name < 0)
+                   ? String::null()
+                   : String::RawCast(FieldAt(thread, by_name, kDeclarationId));
+      w.OpenObject();
+      w.PrintProperty("declaration_id", id_p.ToCString());
+      w.PrintProperty("function_name", name_p.ToCString());
+      w.PrintProperty("resolver", "function_name");
+      w.PrintProperty("resolved_to",
+                      landed.IsNull() ? "<unresolved>" : landed.ToCString());
+      w.CloseObject();
+    }
+  }
+  w.CloseArray();
 
   // --- measurements. Diagnostic only; no threshold is compared. ---
   w.OpenObject("measurements");
@@ -783,6 +1050,12 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
                          impl.IsNull() ? "<null>" : impl.ToCString());
     writer.CloseObject();
     writer.PrintProperty("abi", abi.IsNull() ? "<absent>" : abi.ToCString());
+    {
+      const auto& cc = String::Handle(zone,
+          String::RawCast(FieldAt(thread, i, kCurrentCallConv)));
+      writer.PrintProperty("call_convention",
+                           cc.IsNull() ? "<absent>" : cc.ToCString());
+    }
     writer.PrintPropertyBool(
         "has_staged",
         Smi::Value(Smi::RawCast(FieldAt(thread, i, kStagedKind))) >= 0);
