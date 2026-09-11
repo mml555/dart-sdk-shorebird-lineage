@@ -6,8 +6,11 @@
 
 #include <cstring>
 
+#include "include/dart_api.h"
+
 #include "vm/dart_api_state.h"
 #include "vm/flags.h"
+#include "vm/heap/safepoint.h"
 #include "vm/isolate.h"
 #include "vm/json_writer.h"
 #include "vm/object_store.h"
@@ -29,6 +32,15 @@ DEFINE_FLAG(bool,
             "FALSIFICATION CONTROL. Skip binding at the constructor creation "
             "seam, so a selected constructor silently has no slot while every "
             "ordinary procedure still succeeds.");
+
+DEFINE_FLAG(bool,
+            maot_disable_call_indirection,
+            false,
+            "FALSIFICATION CONTROL. Emit selected direct/static calls as "
+            "ordinary AOT calls bound to the release implementation, so a "
+            "call site that bypasses the dispatch cell can be shown to make "
+            "installation invisible however the output strings happen to "
+            "look.");
 
 DEFINE_FLAG(bool,
             maot_materialize_unselected,
@@ -185,7 +197,8 @@ bool MaotRegistry::Register(Thread* thread,
                             bool selected,
                             const Function& implementation,
                             const String& abi_descriptor,
-                            const String& call_convention) {
+                            const String& call_convention,
+                            const Array& dispatch_cell) {
   Zone* zone = thread->zone();
   if (IndexOf(thread, declaration_id) >= 0) {
     return false;  // duplicate: the caller decides how loudly to fail
@@ -211,6 +224,24 @@ bool MaotRegistry::Register(Thread* thread,
               Heap::kOld);
   storage.Add(abi_descriptor, Heap::kOld);
   storage.Add(call_convention, Heap::kOld);
+  // MAOT-3: the dispatch cell. Created once, at kernel load, and carried
+  // through materialization unchanged -- call sites emitted during
+  // compilation reference THIS object, so replacing it later would strand
+  // every one of them on a cell nobody updates.
+  if (dispatch_cell.IsNull()) {
+    const auto& fresh = Array::Handle(zone, Array::New(1, Heap::kOld));
+    fresh.SetAt(0, implementation);
+    storage.Add(fresh, Heap::kOld);
+  } else {
+    dispatch_cell.SetAt(0, implementation);
+    storage.Add(dispatch_cell, Heap::kOld);
+  }
+  storage.Add(implementation, Heap::kOld);                   // release impl
+  storage.Add(implementation.IsNull() || !implementation.HasCode()
+                  ? Object::null_object()
+                  : Object::Handle(zone, implementation.CurrentCode()),
+              Heap::kOld);                                   // release code
+  storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // call sites
   storage.Add(Smi::Handle(zone, Smi::New(-1)), Heap::kOld);  // staged kind
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // staged version
   storage.Add(Object::null_object(), Heap::kOld);            // staged impl
@@ -331,6 +362,102 @@ bool MaotRegistry::RepinCurrentCode(Thread* thread, intptr_t index) {
   if (before.ptr() == now.ptr()) return false;
   SetFieldAt(thread, index, kCurrentCode, now);
   return true;
+}
+
+ArrayPtr MaotRegistry::DispatchCellForFunction(Thread* thread,
+                                               const Function& function) {
+  if (function.IsNull()) return Array::null();
+  Zone* zone = thread->zone();
+  const intptr_t entries = Length(thread);
+  auto& candidate = Function::Handle(zone);
+  for (intptr_t i = 0; i < entries; i++) {
+    if (Smi::Value(Smi::RawCast(FieldAt(thread, i, kSelected))) != 1) continue;
+    candidate ^= FieldAt(thread, i, kCurrentImpl);
+    // Object identity. The loader bound this exact Function to this exact
+    // DeclarationId; comparing anything else -- a name, a URI, an address --
+    // would be the reconstruction step this program exists to remove.
+    if (candidate.ptr() == function.ptr()) {
+      return Array::RawCast(FieldAt(thread, i, kDispatchCell));
+    }
+  }
+  return Array::null();
+}
+
+bool MaotRegistry::IsMutableDeclaration(Thread* thread,
+                                        const Function& function) {
+  return DispatchCellForFunction(thread, function) != Array::null();
+}
+
+void MaotRegistry::NoteCallSiteEmitted(Thread* thread,
+                                       const Function& function) {
+  if (function.IsNull()) return;
+  Zone* zone = thread->zone();
+  const intptr_t entries = Length(thread);
+  auto& candidate = Function::Handle(zone);
+  for (intptr_t i = 0; i < entries; i++) {
+    candidate ^= FieldAt(thread, i, kCurrentImpl);
+    if (candidate.ptr() != function.ptr()) continue;
+    const intptr_t n =
+        Smi::Value(Smi::RawCast(FieldAt(thread, i, kCallSiteCount)));
+    SetFieldAt(thread, i, kCallSiteCount,
+               Smi::Handle(zone, Smi::New(n + 1)));
+    return;
+  }
+}
+
+intptr_t MaotRegistry::CallSiteCountFor(Thread* thread,
+                                        const Function& function) {
+  if (function.IsNull()) return 0;
+  Zone* zone = thread->zone();
+  const intptr_t entries = Length(thread);
+  auto& candidate = Function::Handle(zone);
+  for (intptr_t i = 0; i < entries; i++) {
+    candidate ^= FieldAt(thread, i, kCurrentImpl);
+    if (candidate.ptr() == function.ptr()) {
+      return Smi::Value(Smi::RawCast(FieldAt(thread, i, kCallSiteCount)));
+    }
+  }
+  return 0;
+}
+
+void MaotRegistry::SetCallSiteCountFor(Thread* thread,
+                                       const String& declaration_id,
+                                       intptr_t count) {
+  const intptr_t entry = IndexOf(thread, declaration_id);
+  if (entry < 0) return;
+  SetFieldAt(thread, entry, kCallSiteCount,
+             Smi::Handle(thread->zone(), Smi::New(count)));
+}
+
+intptr_t MaotRegistry::InstallForTesting(Thread* thread,
+                                         const String& declaration_id,
+                                         const String& implementation_id,
+                                         intptr_t version,
+                                         const String& patch_namespace) {
+  Zone* zone = thread->zone();
+  const intptr_t target = IndexOf(thread, declaration_id);
+  if (target < 0) return -1;  // unknown declaration, never created
+  const intptr_t source = IndexOf(thread, implementation_id);
+  if (source < 0) return -2;  // unknown implementation
+
+  const auto& impl = Function::Handle(
+      zone, Function::RawCast(FieldAt(thread, source, kCurrentImpl)));
+  const auto& abi = String::Handle(
+      zone, String::RawCast(FieldAt(thread, source, kCurrentAbi)));
+  const auto& cc = String::Handle(
+      zone, String::RawCast(FieldAt(thread, source, kCurrentCallConv)));
+
+  // Every check #66 already owns runs here, in the same order, before
+  // anything is visible: namespace, ABI, calling convention, version.
+  if (!StageReplacement(thread, declaration_id, kPatchCode, version, impl, abi,
+                        cc, patch_namespace)) {
+    return -3;
+  }
+  if (!CommitStagedForTesting(thread, declaration_id)) {
+    AbandonStagedForTesting(thread, declaration_id);
+    return -4;
+  }
+  return 0;
 }
 
 intptr_t MaotRegistry::CountDivergedImplementations(Thread* thread,
@@ -507,6 +634,17 @@ bool MaotRegistry::CommitStagedForTesting(Thread* thread,
              staged_fn.IsNull() || !staged_fn.HasCode()
                  ? Object::null_object()
                  : Object::Handle(zone, staged_fn.CurrentCode()));
+  // MAOT-3: this single store is the installation. Every precompiled call
+  // site for this declaration loads the cell on every call, so the next
+  // invocation reaches the new implementation -- without rewriting one byte
+  // of machine code, and without touching Function::entry_point_ of either
+  // the old or the new implementation.
+  const auto& cell =
+      Array::Handle(zone, Array::RawCast(FieldAt(thread, entry,
+                                                 kDispatchCell)));
+  if (!cell.IsNull()) {
+    cell.SetAt(0, staged_impl);
+  }
   SetFieldAt(thread, entry, kCurrentAbi,
              Object::Handle(zone, FieldAt(thread, entry, kStagedAbi)));
   SetFieldAt(thread, entry, kCurrentCallConv,
@@ -1106,6 +1244,45 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
     writer.PrintProperty("implementation_name_diagnostic",
                          impl.IsNull() ? "<null>" : impl.ToCString());
     writer.CloseObject();
+    // MAOT-3 compiler-path evidence. A declaration with zero emitted indirect
+    // call sites has no caller that can reach its descriptor, whatever the
+    // program prints.
+    writer.PrintProperty64(
+        "indirect_call_sites_emitted",
+        Smi::Value(Smi::RawCast(FieldAt(thread, i, kCallSiteCount))));
+    {
+      const auto& release_fn = Function::Handle(zone,
+          Function::RawCast(FieldAt(thread, i, kReleaseImpl)));
+      const auto& cell = Array::Handle(zone,
+          Array::RawCast(FieldAt(thread, i, kDispatchCell)));
+      const auto& in_cell = Object::Handle(zone,
+          cell.IsNull() ? Object::null() : cell.At(0));
+      const auto& current_fn = Function::Handle(zone,
+          Function::RawCast(FieldAt(thread, i, kCurrentImpl)));
+      writer.OpenObject("release");
+      writer.PrintProperty("implementation_name_diagnostic",
+                           release_fn.IsNull() ? "<absent>"
+                                               : release_fn.ToCString());
+      // Requirement 9: the release implementation stays representable after
+      // replacement, so rollback and version history have something to name.
+      writer.PrintPropertyBool("still_represented", !release_fn.IsNull());
+      writer.PrintPropertyBool("is_current",
+                               !release_fn.IsNull() &&
+                                   release_fn.ptr() == current_fn.ptr());
+      writer.CloseObject();
+      writer.OpenObject("dispatch_cell");
+      writer.PrintPropertyBool("present", !cell.IsNull());
+      writer.PrintProperty("holds_diagnostic",
+                           in_cell.IsNull() ? "<absent>" : in_cell.ToCString());
+      // The cell and the descriptor must never disagree: the cell is what
+      // callers read, the descriptor is what the evidence reports, and a
+      // divergence would mean the program runs something the record does not
+      // describe.
+      writer.PrintPropertyBool("agrees_with_current",
+                               !cell.IsNull() &&
+                                   in_cell.ptr() == current_fn.ptr());
+      writer.CloseObject();
+    }
     writer.PrintProperty("abi", abi.IsNull() ? "<absent>" : abi.ToCString());
     {
       const auto& cc = String::Handle(zone,
@@ -1129,5 +1306,83 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
   fputs(writer.ToCString(), file);
   fclose(file);
 }
+
+// ---------------------------------------------------------------------------
+// MAOT-3 (#67) test harness seam.
+//
+// The #67 fixture has to install a replacement BETWEEN two calls, inside one
+// running process. Exported C symbols reached over dart:ffi are the smallest
+// seam that does that without touching the SDK libraries, the platform dill,
+// the CLI or the distribution: the fixture looks them up with
+// DynamicLibrary.process() and calls them like any other native.
+//
+// They are test-only and say so in their names. #71 owns the real transaction
+// API and #77 owns the production install path; nothing here is either.
+//
+// The Dart_ prefix is not decoration: runtime/bin/BUILD.gn's
+// "export_api_symbols" config exports exactly `-Wl,_Dart_*` on macOS, so a
+// symbol named anything else is compiled, linked, and then invisible to
+// dlsym. No build change is needed, and none should be made for this.
+// visibility("default") alone is not enough: nothing inside the binary
+// references these, so the linker dead-strips them before the export list is
+// applied and dlsym finds nothing. `used` is what keeps them.
+#if defined(_WIN32)
+#define MAOT_TEST_EXPORT extern "C" __declspec(dllexport)
+#else
+#define MAOT_TEST_EXPORT                                                       \
+  extern "C" __attribute__((visibility("default"))) __attribute__((used))
+#endif
+
+MAOT_TEST_EXPORT int64_t Dart_MaotInstallForTesting(const char* declaration_id,
+                                          const char* implementation_id,
+                                          int64_t version,
+                                          const char* patch_namespace) {
+  Thread* thread = Thread::Current();
+  if (thread == nullptr) return -10;
+  TransitionNativeToVM transition(thread);
+  StackZone zone(thread);
+  HANDLESCOPE(thread);
+  const auto& id = String::Handle(thread->zone(),
+                                  String::New(declaration_id, Heap::kOld));
+  const auto& impl = String::Handle(thread->zone(),
+                                    String::New(implementation_id,
+                                                Heap::kOld));
+  const auto& ns = String::Handle(thread->zone(),
+                                  String::New(patch_namespace, Heap::kOld));
+  return MaotRegistry::InstallForTesting(thread, id, impl,
+                                         static_cast<intptr_t>(version), ns);
+}
+
+MAOT_TEST_EXPORT int64_t Dart_MaotCurrentVersionForTesting(const char* declaration_id) {
+  Thread* thread = Thread::Current();
+  if (thread == nullptr) return -10;
+  TransitionNativeToVM transition(thread);
+  StackZone zone(thread);
+  HANDLESCOPE(thread);
+  const auto& id = String::Handle(thread->zone(),
+                                  String::New(declaration_id, Heap::kOld));
+  MaotRegistry::Kind kind = MaotRegistry::kAot;
+  intptr_t version = 0;
+  if (!MaotRegistry::LookupCurrent(thread, id, &kind, &version, nullptr,
+                                   nullptr)) {
+    return -1;
+  }
+  // Kind in the sign, version in the magnitude: one call, two facts, and the
+  // fixture prints both into the evidence.
+  return (kind == MaotRegistry::kAot) ? version : -version - 100;
+}
+
+MAOT_TEST_EXPORT int64_t Dart_MaotDumpForTesting(const char* path) {
+  Thread* thread = Thread::Current();
+  if (thread == nullptr) return -10;
+  TransitionNativeToVM transition(thread);
+  StackZone zone(thread);
+  HANDLESCOPE(thread);
+  MaotRegistry::DumpToFile(thread, path);
+  return 0;
+}
+
+
+#undef MAOT_TEST_EXPORT
 
 }  // namespace dart

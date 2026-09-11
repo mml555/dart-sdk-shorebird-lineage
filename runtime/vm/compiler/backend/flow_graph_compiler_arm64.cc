@@ -6,6 +6,7 @@
 #if defined(TARGET_ARCH_ARM64)
 
 #include "vm/compiler/backend/flow_graph_compiler.h"
+#include "vm/maot_registry.h"
 
 #include "vm/compiler/api/type_check_mode.h"
 #include "vm/compiler/backend/il_printer.h"
@@ -402,6 +403,58 @@ void FlowGraphCompiler::GenerateStaticDartCall(intptr_t deopt_id,
                                                const Function& target,
                                                Code::EntryKind entry_kind) {
   ASSERT(CanCallDart());
+
+  // MUTABLE-AOT (#67). A selected declaration's direct/static call sites must
+  // not be able to bind permanently to the release implementation.
+  //
+  //     x0 <- the descriptor's dispatch cell        (object pool, compile time)
+  //     x0 <- [x0 + Array::element_offset(0)]       (current implementation)
+  //     blr [x0 + Function::entry_point_]
+  //
+  // The cell is part of the #66 descriptor and is written only by that class's
+  // mutation API, so installing a replacement is a state change rather than a
+  // patch of machine bytes. Note what is NOT done here: nothing rewrites
+  // Function::entry_point_ of the old or new implementation, and nothing
+  // records a static-call target, because there is no fixed target to record
+  // -- the callee is resolved on every call.
+  //
+  // The cell reference comes from the object pool, established while the
+  // Kernel binding was authoritative. It is never re-found at run time.
+  if (FLAG_precompiled_mode && !FLAG_maot_disable_call_indirection) {
+    // ZoneHandle, not Handle. The object pool builder stores a POINTER to the
+    // handle it is given and dereferences it later, when the pool is
+    // serialized. A scoped handle dies with the enclosing HANDLESCOPE, and the
+    // pool is then holding a dangling pointer -- which surfaces as a
+    // segmentation fault inside LoadObject, nowhere near the mistake.
+    const Array& cell = Array::ZoneHandle(
+        zone(), MaotRegistry::DispatchCellForFunction(thread(), target));
+    if (!cell.IsNull()) {
+      MaotRegistry::NoteCallSiteEmitted(thread(), target);
+      if (FLAG_maot_trace_registration) {
+        OS::PrintErr("[maot] indirect call site for %s\n", target.ToCString());
+      }
+      // LoadUniqueObject, not LoadObject. The non-patchable path dedups pool
+      // entries through ObjIndexPair::Hash -> ObjectHash, which sends any
+      // Instance to Instance::CanonicalizeHash -- and an Array is an Instance.
+      // Canonicalize-hashing a cell whose element is a VM Function walks it as
+      // if it were a Dart value and faults inside LoadObject, nowhere near the
+      // call site being emitted. "Unique" is also the right meaning: each
+      // declaration's cell is a distinct identity that must never be merged
+      // with another's.
+      __ LoadUniqueObject(FUNCTION_REG, cell);
+      __ LoadCompressed(
+          FUNCTION_REG,
+          compiler::FieldAddress(FUNCTION_REG,
+                                 compiler::target::Array::element_offset(0)));
+      CLOBBERS_LR(__ Call(compiler::FieldAddress(
+          FUNCTION_REG,
+          compiler::target::Function::entry_point_offset(entry_kind))));
+      EmitCallsiteMetadata(source, deopt_id, kind, locs,
+                           pending_deoptimization_env_);
+      return;
+    }
+  }
+
 #if defined(DART_DYNAMIC_MODULES)
   if (FLAG_precompiled_mode && FLAG_patchable_static_calls) {
     // Route B: the third call form. The two below both resolve the callee at

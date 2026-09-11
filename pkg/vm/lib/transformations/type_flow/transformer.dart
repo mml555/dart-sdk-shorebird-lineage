@@ -540,6 +540,7 @@ class AnnotateKernel extends RecursiveVisitor {
     Type type, {
     bool skipCheck = false,
     bool receiverNotInt = false,
+    bool suppressConstant = false,
   }) {
     InterfaceType? exactType;
     Class? concreteClass;
@@ -617,6 +618,19 @@ class AnnotateKernel extends RecursiveVisitor {
         skipCheck ||
         receiverNotInt ||
         closureMember != null) {
+      if (suppressConstant) {
+        // MUTABLE-AOT (#67), conservative posture. A selected declaration's
+        // body can be replaced at run time, so what it returns TODAY is not
+        // what it returns. Handing the compiler a constant here lets it keep
+        // the call and discard the result -- which is exactly what happened:
+        // eleven indirect call sites were emitted, every one of them reached
+        // the dispatch cell, and every caller still printed the release
+        // answer because the RESULT had been folded to a constant.
+        //
+        // Suppressing the constant is the narrow form of "may not be
+        // constant-folded through". #68 owns the general optimizer contract.
+        constantValue = null;
+      }
       if (constantValue != null) {
         constantValue = treeShakeConstant(constantValue);
       }
@@ -641,11 +655,13 @@ class AnnotateKernel extends RecursiveVisitor {
     Type type, {
     bool skipCheck = false,
     bool receiverNotInt = false,
+    bool suppressConstant = false,
   }) {
     final inferredType = _convertType(
       type,
       skipCheck: skipCheck,
       receiverNotInt: receiverNotInt,
+      suppressConstant: suppressConstant,
     );
     if (inferredType != null) {
       _inferredTypeMetadata.mapping[node] = inferredType;
@@ -668,6 +684,17 @@ class AnnotateKernel extends RecursiveVisitor {
 
   void _setUnreachable(TreeNode node) {
     _unreachableNodeMetadata.mapping[node] = const UnreachableNode();
+  }
+
+  /// Whether this call site invokes a Mutable-AOT selected declaration.
+  ///
+  /// The direct target is what matters: an interface target says what the
+  /// source named, and #67 covers only direct/static calls.
+  bool _callsMaotMutable(TreeNode node, Member? interfaceTarget) {
+    final Member? target = node is StaticInvocation
+        ? node.target
+        : (node is ConstructorInvocation ? node.target : interfaceTarget);
+    return target != null && _isMaotMutable(target);
   }
 
   void _annotateCallSite(TreeNode node, Member? interfaceTarget) {
@@ -726,6 +753,7 @@ class AnnotateKernel extends RecursiveVisitor {
         resultType,
         skipCheck: markSkipCheck,
         receiverNotInt: markReceiverNotInt,
+        suppressConstant: _callsMaotMutable(node, interfaceTarget),
       );
     }
 

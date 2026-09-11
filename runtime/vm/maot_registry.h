@@ -58,6 +58,7 @@ namespace dart {
 
 DECLARE_FLAG(charp, maot_dump_registry);
 DECLARE_FLAG(charp, maot_probe_resolvers);
+DECLARE_FLAG(bool, maot_disable_call_indirection);
 DECLARE_FLAG(charp, maot_namespace);
 DECLARE_FLAG(bool, maot_trace_registration);
 DECLARE_FLAG(bool, maot_disable_seeding);
@@ -92,12 +93,16 @@ class MaotRegistry : public AllStatic {
   // `call_convention` may be empty at kernel-load time: the precompiler has
   // not decided unboxing yet. It is filled in at materialization, which is the
   // first moment the answer exists.
+  // `dispatch_cell` is null on first registration (one is created) and is the
+  // EXISTING cell when the precompiler re-registers the entry at
+  // materialization -- call sites already reference that object.
   static bool Register(Thread* thread,
                        const String& declaration_id,
                        bool selected,
                        const Function& implementation,
                        const String& abi_descriptor,
-                       const String& call_convention);
+                       const String& call_convention,
+                       const Array& dispatch_cell = Array::null_array());
 
   // The final AOT calling-convention shape of `function`, rendered as a
   // canonical string. Derived from what compiler::ComputeCallingConvention
@@ -150,6 +155,43 @@ class MaotRegistry : public AllStatic {
                       String* call_convention = nullptr);
 
   static void Clear(Thread* thread);
+
+  // --- MAOT-3 (#67): the call-site indirection ----------------------------
+
+  // The dispatch cell a static call to `function` must load from, or null when
+  // `function` is not a selected Mutable-AOT declaration.
+  //
+  // Looked up by OBJECT IDENTITY against the Function the loader bound, not by
+  // name, address or any other reconstruction: it is the same object the
+  // metadata named. Only meaningful inside the precompiler, where that binding
+  // is still in the table.
+  static ArrayPtr DispatchCellForFunction(Thread* thread,
+                                          const Function& function);
+
+  // Whether `function` is a selected Mutable-AOT declaration. Used by the
+  // inliner to refuse to inline through the mutable boundary.
+  static bool IsMutableDeclaration(Thread* thread, const Function& function);
+
+  // Records that one more indirect call site was emitted for `function`.
+  static void NoteCallSiteEmitted(Thread* thread, const Function& function);
+
+  // Compiler-path evidence, gathered during code generation and therefore
+  // carried across the rebuild of the table at materialization.
+  static intptr_t CallSiteCountFor(Thread* thread, const Function& function);
+  static void SetCallSiteCountFor(Thread* thread,
+                                  const String& declaration_id,
+                                  intptr_t count);
+
+  // Installs `implementation` as the current implementation of
+  // `declaration_id` at `version`: stages through the normal compatibility
+  // checks and then commits. Returns 0 on success, or a negative code saying
+  // which check refused. Test-only entry point for the #67 harness -- #71 owns
+  // real transactions.
+  static intptr_t InstallForTesting(Thread* thread,
+                                    const String& declaration_id,
+                                    const String& implementation_id,
+                                    intptr_t version,
+                                    const String& patch_namespace);
 
   // How many entries' pinned Code no longer matches the Function's current
   // Code. A replacement that rewrites Function::CurrentCode() directly leaves
@@ -261,6 +303,23 @@ class MaotRegistry : public AllStatic {
     kCurrentCode,         // Code, or null outside AOT
     kCurrentAbi,          // String -- Kernel/source-call shape
     kCurrentCallConv,     // String -- final AOT calling-convention shape
+    // MAOT-3 (#67). The one-element Array that COMPILED CALL SITES load from.
+    // It is part of the descriptor, not a separate mechanism: the only thing
+    // that writes it is this class's mutation API, so installing a
+    // replacement is a #66 state change and never a patch of machine bytes.
+    // A call site references this object directly, from the object pool,
+    // established while the Kernel binding was authoritative -- it is never
+    // re-found.
+    kDispatchCell,        // Array(1) holding the current implementation
+    // The release implementation, captured once and never overwritten, so a
+    // replaced declaration can still say what it shipped as. #71 owns real
+    // version history; this is the one entry that history will need.
+    kReleaseImpl,         // Function
+    kReleaseCode,         // Code, or null
+    // How many Mutable-AOT indirect call sites the compiler emitted for this
+    // declaration. Compiler-path evidence: zero means every caller bound
+    // somewhere else, whatever the program prints.
+    kCallSiteCount,       // Smi
     kStagedKind,          // Smi, or -1 when nothing staged
     kStagedVersion,       // Smi
     kStagedImpl,          // Function or null

@@ -1626,6 +1626,12 @@ void Precompiler::SeedMutableAotRoots() {
                    had_code_before ? 1 : 0,
                    (!already_possibly_retained && !already_seen) ? 1 : 0);
     }
+    // MAOT-3 (#67), conservative posture: a selected declaration may not be
+    // inlined. An inlined copy is a caller that never reaches the dispatch
+    // cell, so installation would be invisible to it -- the exact defect the
+    // falsification arms have to catch. #68 generalises this into the real
+    // optimizer contract; here it is a blunt, recorded rule.
+    fn.set_is_inlinable(false);
     seeded++;
   }
   if (FLAG_maot_trace_registration) {
@@ -1658,6 +1664,8 @@ void Precompiler::MaterializeMutableAotRegistry() {
   GrowableArray<const Function*> keep_fns;
   GrowableArray<const String*> keep_abis;
   GrowableArray<const String*> keep_call_convs;
+  GrowableArray<const Array*> keep_cells;
+  GrowableArray<intptr_t> keep_call_sites;
   GrowableArray<bool> keep_selected;
   intptr_t selected_seen = 0;
   intptr_t dropped = 0;
@@ -1701,6 +1709,17 @@ void Precompiler::MaterializeMutableAotRegistry() {
     // DART_PRECOMPILED_RUNTIME. It travels as data or not at all.
     keep_call_convs.Add(&String::ZoneHandle(Z,
         MaotRegistry::ComputeCallConvention(T, fn)));
+    // Carry the EXISTING dispatch cell across. Call sites emitted during
+    // compilation already reference this object; handing out a fresh one here
+    // would leave every one of them loading a cell that installation never
+    // writes, and the program would keep printing the release answer forever.
+    keep_cells.Add(&Array::ZoneHandle(Z,
+        MaotRegistry::DispatchCellForFunction(T, fn)));
+    // The call-site count is compiler-path evidence gathered DURING code
+    // generation, so it has to survive the rebuild of the table that happens
+    // after it. Re-registering without it reported zero emitted call sites
+    // for declarations that had eleven.
+    keep_call_sites.Add(MaotRegistry::CallSiteCountFor(T, fn));
     // Carry the real flag through. Rewriting it to true would make the
     // --maot_materialize_unselected falsification unable to show the defect it
     // exists to show: an unselected declaration holding an authoritative slot.
@@ -1711,7 +1730,8 @@ void Precompiler::MaterializeMutableAotRegistry() {
   for (intptr_t i = 0; i < keep_ids.length(); i++) {
     const bool ok = MaotRegistry::Register(T, *keep_ids[i], keep_selected[i],
                                           *keep_fns[i], *keep_abis[i],
-                                          *keep_call_convs[i]);
+                                          *keep_call_convs[i], *keep_cells[i]);
+    MaotRegistry::SetCallSiteCountFor(T, *keep_ids[i], keep_call_sites[i]);
     ASSERT(ok);
   }
   MaotRegistry::SetMaterializationStats(selected_seen, keep_ids.length(),
