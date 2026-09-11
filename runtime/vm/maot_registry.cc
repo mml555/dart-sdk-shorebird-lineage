@@ -352,16 +352,33 @@ intptr_t MaotRegistry::LookupByFunctionNameForFalsification(
 
 bool MaotRegistry::RepinCurrentCode(Thread* thread, intptr_t index) {
   Zone* zone = thread->zone();
-  const auto& fn =
-      Function::Handle(zone, Function::RawCast(FieldAt(thread, index,
-                                                       kCurrentImpl)));
-  const auto& before = Object::Handle(zone, FieldAt(thread, index,
-                                                    kCurrentCode));
-  const auto& now = Object::Handle(zone,
-      fn.IsNull() || !fn.HasCode() ? Object::null() : fn.CurrentCode());
-  if (before.ptr() == now.ptr()) return false;
-  SetFieldAt(thread, index, kCurrentCode, now);
-  return true;
+  bool changed = false;
+
+  // BOTH pinned Code fields, not just the current one. Each is captured
+  // before ProgramVisitor::Dedup, so each can be holding an object Dedup
+  // later merges away -- and holding a pre-dedup Code keeps two Code objects
+  // with identical Instructions reachable, which the serializer refuses:
+  //
+  //   RELEASE_ASSERT(!FLAG_precompiled_mode)   // app_snapshot.cc
+  //
+  // #66 fixed this for kCurrentCode. #67 added kReleaseCode and reintroduced
+  // exactly the same defect through it, which #66's own gate caught on the
+  // first regression run.
+  const struct { EntryField code; EntryField impl; } kPinned[] = {
+      {kCurrentCode, kCurrentImpl},
+      {kReleaseCode, kReleaseImpl},
+  };
+  for (const auto& pin : kPinned) {
+    const auto& fn = Function::Handle(
+        zone, Function::RawCast(FieldAt(thread, index, pin.impl)));
+    const auto& before = Object::Handle(zone, FieldAt(thread, index, pin.code));
+    const auto& now = Object::Handle(zone,
+        fn.IsNull() || !fn.HasCode() ? Object::null() : fn.CurrentCode());
+    if (before.ptr() == now.ptr()) continue;
+    SetFieldAt(thread, index, pin.code, now);
+    changed = true;
+  }
+  return changed;
 }
 
 ArrayPtr MaotRegistry::DispatchCellForFunction(Thread* thread,
