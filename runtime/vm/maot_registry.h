@@ -89,6 +89,29 @@ class MaotRegistry : public AllStatic {
 
   static intptr_t Length(Thread* thread);
 
+  // --- transient -> final materialization --------------------------------
+  //
+  // During compilation this table is TRANSIENT: it carries the load-time
+  // DeclarationId <-> Function association into the precompiler. It is not
+  // the final runtime registry, and it must not decide what the compiler
+  // retains -- GC reachability is not the same property as "legally retained
+  // by the AOT precompiler". The precompiler consumes selection explicitly
+  // via Precompiler::AddFunction, then rebuilds this table from the retained
+  // set before serialization.
+  static void EntryAt(Thread* thread,
+                      intptr_t index,
+                      String* declaration_id,
+                      bool* selected,
+                      Function* implementation,
+                      String* abi_descriptor);
+
+  static void Clear(Thread* thread);
+
+  // Recorded so the gate can compare sets, not just counts.
+  static void SetMaterializationStats(intptr_t selected,
+                                      intptr_t retained,
+                                      intptr_t dropped);
+
   // --- staging -----------------------------------------------------------
   //
   // #66 owns only the state primitive. #71 owns atomic multi-declaration

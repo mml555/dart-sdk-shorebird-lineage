@@ -159,6 +159,16 @@ class MaotDeclarationIdMetadataRepository
   /// less than the program.
   final List<String> refusals = [];
 
+  /// Declarations that were SELECTED before tree shaking and then had no node
+  /// to attach metadata to afterwards.
+  ///
+  /// This exists because a Set of selected ids is decorative unless some
+  /// decision reads it. A selected declaration that vanished cannot be
+  /// patched later, so the release must fail closed rather than ship a
+  /// namespace that silently promises less than it claims. The #66 gate
+  /// consumes this list; it is not advisory.
+  final List<String> selectedButAbsent = [];
+
   // The payload is three fields: the id, the selection flag, and the ABI in
   // its CANONICAL STRING form. The canonical form is rendered once, here,
   // where the descriptor is defined -- reconstructing it on the VM side would
@@ -226,6 +236,16 @@ class MaotDeclarationIdMetadataRepository
       }
     }
     return selected;
+  }
+
+  /// Records which selected ids never received metadata. Call after [index].
+  void recordSelectedAbsences(Set<String> selectedIds) {
+    final mapped = <String>{
+      for (final m in mapping.values) m.declarationId,
+    };
+    for (final id in selectedIds) {
+      if (!mapped.contains(id)) selectedButAbsent.add(id);
+    }
   }
 
   void index(

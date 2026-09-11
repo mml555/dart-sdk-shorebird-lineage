@@ -237,12 +237,14 @@ Component transformComponent(
   // moving the ATTACHMENT later does not weaken the selection contract.
   final maotMetadata = MaotDeclarationIdMetadataRepository();
   maotMetadata.index(component, maotIdentity, selectedIds: maotSelectedIds);
+  maotMetadata.recordSelectedAbsences(maotSelectedIds);
   component.addMetadataRepository(maotMetadata);
   if (const bool.fromEnvironment('maot.trace')) {
     // ignore: avoid_print
     print('[maot-dart] selected=${maotSelectedIds.length} '
         'mapped=${maotMetadata.mapping.length} '
-        'refusals=${maotMetadata.refusals.length}');
+        'refusals=${maotMetadata.refusals.length} '
+        'selectedButAbsent=${maotMetadata.selectedButAbsent}');
     for (final e in maotMetadata.mapping.entries.take(8)) {
       // ignore: avoid_print
       print('[maot-dart]   ${e.value.declarationId} selected=${e.value.selected}');
