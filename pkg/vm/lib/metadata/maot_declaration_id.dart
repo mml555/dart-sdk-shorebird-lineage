@@ -353,7 +353,12 @@ class MaotDeclarationIdMetadataRepository
       // a different fact from the bound of type parameter 1, and sorting
       // would let a reordering compare equal.
       for (final tp in function.typeParameters) {
-        bounds.add(renderType(tp.bound, identity, function.typeParameters));
+        bounds.add(renderType(
+          tp.bound,
+          identity,
+          methodScope: function.typeParameters,
+          ownerScope: owner?.typeParameters ?? const <TypeParameter>[],
+        ));
       }
     }
 
@@ -372,19 +377,51 @@ class MaotDeclarationIdMetadataRepository
 
   /// Renders a Kernel type as an identity string.
   ///
-  /// Total by construction: a shape this does not know how to spell becomes
-  /// `unrepresentable:<node kind>` rather than a token that might accidentally
-  /// compare equal to a different unknown shape. The runtime refuses to stage
-  /// a replacement when either side carries such a token, because it cannot
-  /// certify a compatibility it could not describe.
+  /// INJECTIVE OVER SHAPE, which is the only property that matters here. A
+  /// compatibility gate that lets two semantically different shapes
+  /// canonicalize to the same string is false-safe: it certifies a
+  /// replacement that changes the contract.
   ///
-  /// Type parameters are rendered BY POSITION within [scope], so renaming
-  /// `<T>` to `<E>` is not a change and reordering two parameters is.
+  /// Every generic scope is therefore POSITIONAL, never a name:
+  ///
+  ///   method type parameter          `mtp<i>`
+  ///   enclosing-class type parameter `otp<i>`
+  ///   nested function-type parameter `ftp<depth>.<i>` (depth 0 = innermost)
+  ///
+  /// Renaming a type parameter is invisible, because a name never appears.
+  /// Reordering, rebinding, or moving a reference to a different binder
+  /// changes the token, because the position does.
+  ///
+  /// An earlier version rendered enclosing-class and structural parameters by
+  /// NAME (`ownertp:A`, `stp:X`) and dropped a nested `FunctionType`'s own
+  /// type parameters entirely. Both were collision classes:
+  ///
+  ///   `class P1<A, B> { T m<T extends A>(T x); }`
+  ///   `class P2<B, A> { T m<T extends A>(T x); }`  -- A is a different slot
+  ///
+  ///   `T extends X Function<X extends num>(X)`
+  ///   `T extends X Function<X extends int>(X)`  -- nested bound dropped
+  ///
+  /// Kernel itself treats a function type's type-parameter bounds as semantic
+  /// content -- `FunctionType._computeHashCode` hashes `parameter.bound` for
+  /// each one -- so dropping them was a divergence from the language's own
+  /// notion of type identity, not merely an abbreviation.
+  ///
+  /// Total by construction: a shape this cannot spell becomes an explicit
+  /// `unrepresentable:` token rather than one that might accidentally compare
+  /// equal to a different unknown, and the runtime refuses to stage against a
+  /// descriptor carrying one.
   static String renderType(
     DartType type,
-    MaotIdentity identity,
-    List<TypeParameter> scope,
-  ) {
+    MaotIdentity identity, {
+    required List<TypeParameter> methodScope,
+    required List<TypeParameter> ownerScope,
+  }) {
+    // Innermost binder last. A StructuralParameterType is rendered by its
+    // distance from its own binder, so the same shape under a different
+    // enclosing nesting is the same token and a rebinding is not.
+    final binders = <List<StructuralParameter>>[];
+
     String nul(Nullability n) {
       switch (n) {
         case Nullability.nullable:
@@ -402,36 +439,59 @@ class MaotDeclarationIdMetadataRepository
       if (t is NeverType) return 'never${nul(t.nullability)}';
       if (t is NullType) return 'null';
       if (t is InvalidType) return 'unrepresentable:invalid';
+
       if (t is InterfaceType) {
         final args = t.typeArguments.map(render).join(',');
         return '${identity.classId(t.classNode).id}'
             '${args.isEmpty ? "" : "<$args>"}${nul(t.nullability)}';
       }
+
       if (t is FutureOrType) {
         return 'futureor<${render(t.typeArgument)}>${nul(t.nullability)}';
       }
+
       if (t is TypeParameterType) {
-        final i = scope.indexOf(t.parameter);
-        // Out of scope means it belongs to the enclosing class, whose
-        // genericity is already recorded by ownerIsGeneric; naming it by
-        // position here would be a position in a different list.
-        return i >= 0
-            ? 'tp$i${nul(t.nullability)}'
-            : 'ownertp:${t.parameter.name ?? ""}${nul(t.nullability)}';
+        final method = methodScope.indexOf(t.parameter);
+        if (method >= 0) return 'mtp$method${nul(t.nullability)}';
+        final owner = ownerScope.indexOf(t.parameter);
+        if (owner >= 0) return 'otp$owner${nul(t.nullability)}';
+        // Naming it would be exactly the collision this renderer exists to
+        // avoid, so an out-of-scope reference is refused instead.
+        return 'unrepresentable:type-parameter-out-of-scope';
       }
+
       if (t is StructuralParameterType) {
-        return 'stp:${t.parameter.name ?? ""}${nul(t.nullability)}';
+        for (var depth = 0; depth < binders.length; depth++) {
+          final binder = binders[binders.length - 1 - depth];
+          final i = binder.indexOf(t.parameter);
+          if (i >= 0) return 'ftp$depth.$i${nul(t.nullability)}';
+        }
+        return 'unrepresentable:structural-parameter-out-of-scope';
       }
+
       if (t is FunctionType) {
-        final pos = t.positionalParameters.map(render).join(',');
-        final named = [
-          for (final n in t.namedParameters)
-            '${n.isRequired ? "req " : ""}${n.name}:${render(n.type)}',
-        ]..sort();
-        return 'fn(${t.requiredParameterCount}/$pos'
-            '${named.isEmpty ? "" : ";{${named.join(",")}}"})'
-            '->${render(t.returnType)}${nul(t.nullability)}';
+        binders.add(t.typeParameters);
+        try {
+          // The binder's own declarations are part of the shape. Bounds are
+          // rendered with the binder already pushed, so an F-bounded
+          // parameter referring to itself renders as ftp0.<i>.
+          final bounds =
+              t.typeParameters.map((tp) => render(tp.bound)).join('|');
+          final pos = t.positionalParameters.map(render).join(',');
+          final named = [
+            for (final n in t.namedParameters)
+              '${n.isRequired ? "req " : ""}${n.name}:${render(n.type)}',
+          ]..sort();
+          return 'fn<${t.typeParameters.length}'
+              '${bounds.isEmpty ? "" : ":$bounds"}>'
+              '(${t.requiredParameterCount}/$pos'
+              '${named.isEmpty ? "" : ";{${named.join(",")}}"})'
+              '->${render(t.returnType)}${nul(t.nullability)}';
+        } finally {
+          binders.removeLast();
+        }
       }
+
       if (t is RecordType) {
         final pos = t.positional.map(render).join(',');
         final named = [
@@ -440,15 +500,19 @@ class MaotDeclarationIdMetadataRepository
         return 'rec($pos${named.isEmpty ? "" : ";{${named.join(",")}}"})'
             '${nul(t.nullability)}';
       }
+
       if (t is TypedefType) return render(t.unalias);
+
       if (t is ExtensionType) {
         final args = t.typeArguments.map(render).join(',');
         return '${identity.extensionTypeId(t.extensionTypeDeclaration).id}'
             '${args.isEmpty ? "" : "<$args>"}${nul(t.nullability)}';
       }
+
       if (t is IntersectionType) {
         return 'isect<${render(t.left)},${render(t.right)}>';
       }
+
       return 'unrepresentable:${t.runtimeType}';
     }
 

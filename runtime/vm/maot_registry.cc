@@ -72,6 +72,14 @@ DEFINE_FLAG(charp,
             "Write the Mutable-AOT implementation registry to this path as "
             "JSON at isolate group startup (test-only introspection).");
 
+DEFINE_FLAG(charp,
+            maot_probe_resolvers,
+            nullptr,
+            "Write DeclarationId-keyed and name-keyed resolution probes over "
+            "the pristine registry to this path. Separate from --maot_selftest "
+            "on purpose: the self-test mutates state, and a probe taken after "
+            "it reports a Function the declaration no longer owns.");
+
 GrowableObjectArrayPtr MaotRegistry::EnsureStorage(Thread* thread) {
   auto* object_store = thread->isolate_group()->object_store();
   if (object_store->maot_registry() == GrowableObjectArray::null()) {
@@ -522,6 +530,102 @@ bool MaotRegistry::CommitStagedForTesting(Thread* thread,
 // gate derives the verdict from the observations rather than from a summary
 // this file writes about itself.
 // ---------------------------------------------------------------------------
+void MaotRegistry::WriteResolutionProbes(Thread* thread, const char* path) {
+  // PRISTINE BY CONSTRUCTION. These probes must run in a process that has
+  // never staged or committed anything, because S04 in the self-test
+  // deliberately commits one entry's implementation onto another entry's slot
+  // -- and a probe that reads Function::name() after that reports the name of
+  // a Function the declaration no longer owns. Running them at the end of the
+  // self-test produced exactly that: Shapes.instanceOne reporting the name
+  // "compute", and the injected resolver then aliasing onto it for a reason
+  // that had nothing to do with the defect being probed.
+  //
+  // This is the third time in this lane that an arm read state after the state
+  // moved. Separating the process is the structural fix rather than another
+  // reordering: nothing in this function can be re-ordered into a mutation.
+  Zone* zone = thread->zone();
+  JSONWriter w;
+  w.OpenObject();
+  w.PrintProperty("schema", "maot.registry.resolution-probes/1");
+  w.PrintPropertyBool("pristine", !AnyEntryHasStagedOrAdvanced(thread));
+  const intptr_t n = Length(thread);
+  w.PrintProperty64("entry_count", n);
+
+  // Two resolvers over the SAME pristine registry: the production one, keyed
+  // on DeclarationId, and a deliberately name-keyed one that exists only for
+  // falsification. The gate reads both, and cross-checks each probe's
+  // function name against the binding evidence from the registry dump before
+  // it is willing to evaluate either.
+  w.OpenArray("resolution_probes");
+  {
+    auto& id_p = String::Handle(zone);
+    auto& abi_p = String::Handle(zone);
+    auto& fn_p = Function::Handle(zone);
+    auto& name_p = String::Handle(zone);
+    auto& landed = String::Handle(zone);
+    bool sel_p = false;
+    for (intptr_t i = 0; i < n; i++) {
+      EntryAt(thread, i, &id_p, &sel_p, &fn_p, &abi_p);
+      if (fn_p.IsNull()) continue;
+      name_p = fn_p.name();
+
+      const intptr_t by_id = IndexOf(thread, id_p);
+      landed = (by_id < 0)
+                   ? String::null()
+                   : String::RawCast(FieldAt(thread, by_id, kDeclarationId));
+      w.OpenObject();
+      w.PrintProperty("declaration_id", id_p.ToCString());
+      w.PrintProperty("function_name", name_p.ToCString());
+      w.PrintProperty("resolver", "declaration_id");
+      w.PrintProperty("resolved_to",
+                      landed.IsNull() ? "<unresolved>" : landed.ToCString());
+      w.CloseObject();
+
+      const intptr_t by_name =
+          LookupByFunctionNameForFalsification(thread, name_p);
+      landed = (by_name < 0)
+                   ? String::null()
+                   : String::RawCast(FieldAt(thread, by_name, kDeclarationId));
+      w.OpenObject();
+      w.PrintProperty("declaration_id", id_p.ToCString());
+      w.PrintProperty("function_name", name_p.ToCString());
+      w.PrintProperty("resolver", "function_name");
+      w.PrintProperty("resolved_to",
+                      landed.IsNull() ? "<unresolved>" : landed.ToCString());
+      w.CloseObject();
+    }
+  }
+  w.CloseArray();
+  w.CloseObject();
+
+  auto* file = fopen(path, "w");
+  if (file == nullptr) {
+    OS::PrintErr("MaotRegistry: cannot open '%s' for writing\n", path);
+    return;
+  }
+  fputs(w.ToCString(), file);
+  fclose(file);
+}
+
+bool MaotRegistry::AnyEntryHasStagedOrAdvanced(Thread* thread) {
+  // A registry that has been mutated is not pristine, and saying so is the
+  // point: this is reported rather than asserted, so the gate can refuse the
+  // evidence instead of trusting a flag the runtime set about itself.
+  const intptr_t entries = Length(thread);
+  for (intptr_t i = 0; i < entries; i++) {
+    if (Smi::Value(Smi::RawCast(FieldAt(thread, i, kStagedKind))) >= 0) {
+      return true;
+    }
+    if (Smi::Value(Smi::RawCast(FieldAt(thread, i, kCurrentVersion))) != 1) {
+      return true;
+    }
+    if (Smi::Value(Smi::RawCast(FieldAt(thread, i, kCurrentKind))) != kAot) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void MaotRegistry::RunSelfTest(Thread* thread, const char* path) {
   Zone* zone = thread->zone();
   JSONWriter w;
@@ -881,53 +985,6 @@ void MaotRegistry::RunSelfTest(Thread* thread, const char* path) {
   }
   w.CloseArray();
 
-  // ---- resolution probes -------------------------------------------------
-  //
-  // Two resolvers run over the SAME registry: the production one, keyed on
-  // DeclarationId, and a deliberately name-keyed one that exists only here.
-  // The gate reads both. The first must always land on itself; the second is
-  // the injected defect, and the acceptance logic has to refuse the state it
-  // produces. Nothing below changes how production resolves anything.
-  w.OpenArray("resolution_probes");
-  {
-    auto& id_p = String::Handle(zone);
-    auto& abi_p = String::Handle(zone);
-    auto& fn_p = Function::Handle(zone);
-    auto& name_p = String::Handle(zone);
-    auto& landed = String::Handle(zone);
-    bool sel_p = false;
-    for (intptr_t i = 0; i < n; i++) {
-      EntryAt(thread, i, &id_p, &sel_p, &fn_p, &abi_p);
-      if (fn_p.IsNull()) continue;
-      name_p = fn_p.name();
-
-      const intptr_t by_id = IndexOf(thread, id_p);
-      landed = (by_id < 0)
-                   ? String::null()
-                   : String::RawCast(FieldAt(thread, by_id, kDeclarationId));
-      w.OpenObject();
-      w.PrintProperty("declaration_id", id_p.ToCString());
-      w.PrintProperty("function_name", name_p.ToCString());
-      w.PrintProperty("resolver", "declaration_id");
-      w.PrintProperty("resolved_to",
-                      landed.IsNull() ? "<unresolved>" : landed.ToCString());
-      w.CloseObject();
-
-      const intptr_t by_name =
-          LookupByFunctionNameForFalsification(thread, name_p);
-      landed = (by_name < 0)
-                   ? String::null()
-                   : String::RawCast(FieldAt(thread, by_name, kDeclarationId));
-      w.OpenObject();
-      w.PrintProperty("declaration_id", id_p.ToCString());
-      w.PrintProperty("function_name", name_p.ToCString());
-      w.PrintProperty("resolver", "function_name");
-      w.PrintProperty("resolved_to",
-                      landed.IsNull() ? "<unresolved>" : landed.ToCString());
-      w.CloseObject();
-    }
-  }
-  w.CloseArray();
 
   // --- measurements. Diagnostic only; no threshold is compared. ---
   w.OpenObject("measurements");

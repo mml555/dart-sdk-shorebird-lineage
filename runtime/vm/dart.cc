@@ -1023,8 +1023,15 @@ ErrorPtr Dart::InitializeIsolate(Thread* T,
   // snapshot -- is live by this point. This is the seam that lets the gate
   // prove the binding survived into the PRECOMPILED RUNTIME, rather than
   // inferring survival from the fact that Arrays normally serialize.
+  // ORDER MATTERS. The dump and the resolution probes must both observe the
+  // release state, and RunSelfTest deliberately stages and commits, so it runs
+  // last. The gate does not rely on this ordering -- it takes the probes in
+  // their own process -- but a reader of this file should not have to infer it.
   if (FLAG_maot_dump_registry != nullptr) {
     MaotRegistry::DumpToFile(T, FLAG_maot_dump_registry);
+  }
+  if (FLAG_maot_probe_resolvers != nullptr) {
+    MaotRegistry::WriteResolutionProbes(T, FLAG_maot_probe_resolvers);
   }
   if (FLAG_maot_selftest != nullptr) {
     MaotRegistry::RunSelfTest(T, FLAG_maot_selftest);

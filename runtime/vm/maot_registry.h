@@ -57,6 +57,7 @@
 namespace dart {
 
 DECLARE_FLAG(charp, maot_dump_registry);
+DECLARE_FLAG(charp, maot_probe_resolvers);
 DECLARE_FLAG(charp, maot_namespace);
 DECLARE_FLAG(bool, maot_trace_registration);
 DECLARE_FLAG(bool, maot_disable_seeding);
@@ -209,6 +210,17 @@ class MaotRegistry : public AllStatic {
   // resulting aliasing is refused. Returns the index it lands on, or -1.
   static intptr_t LookupByFunctionNameForFalsification(Thread* thread,
                                                        const String& name);
+
+  // Writes the resolution probes -- the production DeclarationId resolver and
+  // the deliberately name-keyed one -- over a PRISTINE registry. Must run in a
+  // process that has not staged or committed anything; RunSelfTest has by
+  // design, so the two cannot share an invocation.
+  static void WriteResolutionProbes(Thread* thread, const char* path);
+
+  // Whether anything in the registry has been staged or advanced past its
+  // release state. Reported rather than asserted, so a consumer can refuse
+  // evidence instead of trusting a flag the runtime set about itself.
+  static bool AnyEntryHasStagedOrAdvanced(Thread* thread);
 
   // Test-only: exercises staging, version, ABI, namespace, duplicate and
   // missing semantics against the live registry and writes structured
