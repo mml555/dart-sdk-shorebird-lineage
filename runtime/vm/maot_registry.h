@@ -36,6 +36,7 @@ namespace dart {
 DECLARE_FLAG(charp, maot_dump_registry);
 DECLARE_FLAG(charp, maot_namespace);
 DECLARE_FLAG(bool, maot_trace_registration);
+DECLARE_FLAG(bool, maot_disable_seeding);
 DECLARE_FLAG(charp, maot_dump_registry_precompile);
 
 class MaotRegistry : public AllStatic {
