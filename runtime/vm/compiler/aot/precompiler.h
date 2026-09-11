@@ -329,6 +329,7 @@ class Precompiler : public ValueObject {
   // has settled.
   void SeedMutableAotRoots();
   void MaterializeMutableAotRegistry();
+  void RepinMutableAotImplementations();
   void AddInstantiatedClass(const Class& cls);
   void AddSelector(const String& selector);
   bool IsSent(const String& selector);

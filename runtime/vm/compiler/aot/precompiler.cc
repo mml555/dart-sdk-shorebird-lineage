@@ -809,6 +809,21 @@ void Precompiler::DoCompileAll() {
       ProgramVisitor::Dedup(T);
     }
 
+    // MUTABLE-AOT (#66): re-pin each descriptor's Code AFTER dedup.
+    //
+    // Materialization runs before the drop phase, which is before dedup, so
+    // the Code it pinned may be one that Dedup has since merged away.
+    // Holding the pre-dedup object keeps two Code objects with identical
+    // Instructions reachable, and the serializer requires exactly the
+    // opposite in precompiled mode:
+    //
+    //   RELEASE_ASSERT(!FLAG_precompiled_mode)   // app_snapshot.cc
+    //
+    // Re-pinning is not a workaround for that assertion: the descriptor is
+    // supposed to name the implementation that ships, and before dedup it
+    // does not yet exist.
+    RepinMutableAotImplementations();
+
     PruneDictionaries();
 
     if (retained_reasons_writer_ != nullptr) {
@@ -1617,6 +1632,18 @@ void Precompiler::SeedMutableAotRoots() {
     OS::PrintErr("[maot] seeded %" Pd " selected declarations as retention "
                  "roots (%" Pd " abstract skipped)\n", seeded,
                  skipped_abstract);
+  }
+}
+
+void Precompiler::RepinMutableAotImplementations() {
+  const intptr_t entries = MaotRegistry::Length(T);
+  intptr_t repinned = 0;
+  for (intptr_t i = 0; i < entries; i++) {
+    if (MaotRegistry::RepinCurrentCode(T, i)) repinned++;
+  }
+  if (FLAG_maot_trace_registration) {
+    OS::PrintErr("[maot] re-pinned %" Pd " of %" Pd " descriptors after "
+                 "dedup\n", repinned, entries);
   }
 }
 
