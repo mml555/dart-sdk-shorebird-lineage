@@ -254,6 +254,8 @@ bool MaotRegistry::Register(Thread* thread,
     storage.Add(impl_id, Heap::kOld);   // release implementation id
   }
   storage.Add(Object::null_object(), Heap::kOld);            // staged impl id
+  storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // escape count
+  storage.Add(Object::null_object(), Heap::kOld);            // escape reason
   storage.Add(Smi::Handle(zone, Smi::New(-1)), Heap::kOld);  // staged kind
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // staged version
   storage.Add(Object::null_object(), Heap::kOld);            // staged impl
@@ -416,6 +418,98 @@ ArrayPtr MaotRegistry::DispatchCellForFunction(Thread* thread,
 bool MaotRegistry::IsMutableDeclaration(Thread* thread,
                                         const Function& function) {
   return DispatchCellForFunction(thread, function) != Array::null();
+}
+
+StringPtr MaotRegistry::DeclarationIdOf(Thread* thread,
+                                        const Function& function) {
+  if (function.IsNull()) return String::null();
+  Zone* zone = thread->zone();
+  const intptr_t entries = Length(thread);
+  auto& candidate = Function::Handle(zone);
+  for (intptr_t i = 0; i < entries; i++) {
+    if (Smi::Value(Smi::RawCast(FieldAt(thread, i, kSelected))) != 1) continue;
+    candidate ^= FieldAt(thread, i, kCurrentImpl);
+    if (candidate.ptr() == function.ptr()) {
+      return String::RawCast(FieldAt(thread, i, kDeclarationId));
+    }
+  }
+  return String::null();
+}
+
+void MaotRegistry::NoteEscape(Thread* thread,
+                              const Function& function,
+                              const char* reason) {
+  if (function.IsNull()) return;
+  Zone* zone = thread->zone();
+  const intptr_t entries = Length(thread);
+  auto& candidate = Function::Handle(zone);
+  auto& id = String::Handle(zone);
+  for (intptr_t i = 0; i < entries; i++) {
+    if (Smi::Value(Smi::RawCast(FieldAt(thread, i, kSelected))) != 1) continue;
+    candidate ^= FieldAt(thread, i, kCurrentImpl);
+    if (candidate.ptr() != function.ptr()) continue;
+    id ^= FieldAt(thread, i, kDeclarationId);
+    NoteEscapeById(thread, id, reason);
+    return;
+  }
+}
+
+void MaotRegistry::NoteEscapeById(Thread* thread,
+                                  const String& declaration_id,
+                                  const char* reason) {
+  Zone* zone = thread->zone();
+  const intptr_t entry = IndexOf(thread, declaration_id);
+  if (entry < 0) return;
+  const intptr_t n =
+      Smi::Value(Smi::RawCast(FieldAt(thread, entry, kEscapeCount)));
+  SetFieldAt(thread, entry, kEscapeCount, Smi::Handle(zone, Smi::New(n + 1)));
+  if (n == 0) {
+    // First reason only: the count says how many, the reason says what kind.
+    // Appending every one would make the field grow without telling any
+    // decision anything it does not already know.
+    SetFieldAt(thread, entry, kEscapeReason,
+               String::Handle(zone, String::New(reason, Heap::kOld)));
+  }
+  if (FLAG_maot_trace_registration) {
+    OS::PrintErr("[maot] ESCAPE %s: %s\n", declaration_id.ToCString(), reason);
+  }
+}
+
+intptr_t MaotRegistry::EscapeCountFor(Thread* thread,
+                                      const String& declaration_id) {
+  const intptr_t entry = IndexOf(thread, declaration_id);
+  if (entry < 0) return -1;
+  return Smi::Value(Smi::RawCast(FieldAt(thread, entry, kEscapeCount)));
+}
+
+void MaotRegistry::EscapeStateFor(Thread* thread,
+                                  const Function& function,
+                                  intptr_t* count,
+                                  String* reason) {
+  *count = 0;
+  *reason = String::null();
+  if (function.IsNull()) return;
+  Zone* zone = thread->zone();
+  const intptr_t entries = Length(thread);
+  auto& candidate = Function::Handle(zone);
+  for (intptr_t i = 0; i < entries; i++) {
+    candidate ^= FieldAt(thread, i, kCurrentImpl);
+    if (candidate.ptr() != function.ptr()) continue;
+    *count = Smi::Value(Smi::RawCast(FieldAt(thread, i, kEscapeCount)));
+    *reason = String::RawCast(FieldAt(thread, i, kEscapeReason));
+    return;
+  }
+}
+
+void MaotRegistry::SetEscapeStateFor(Thread* thread,
+                                     const String& declaration_id,
+                                     intptr_t count,
+                                     const String& reason) {
+  const intptr_t entry = IndexOf(thread, declaration_id);
+  if (entry < 0) return;
+  SetFieldAt(thread, entry, kEscapeCount,
+             Smi::Handle(thread->zone(), Smi::New(count)));
+  SetFieldAt(thread, entry, kEscapeReason, reason);
 }
 
 void MaotRegistry::NoteCallSiteEmitted(Thread* thread,
@@ -602,6 +696,19 @@ bool MaotRegistry::StageReplacement(Thread* thread,
       zone, String::RawCast(FieldAt(thread, entry, kCurrentCallConv)));
   if (current_cc.IsNull() != call_convention.IsNull() ||
       (!current_cc.IsNull() && !current_cc.Equals(call_convention))) {
+    return false;
+  }
+  // MAOT-4 (#68). THE CONSUMPTION. If the compiler recorded any decision that
+  // could let a caller reach an implementation without consulting the
+  // dispatch cell, this declaration cannot be replaced: some executable path
+  // would keep running the release body while the descriptor said otherwise.
+  //
+  // Refusing here is what makes the optimizer record evidence rather than a
+  // statistic. Phase B may relax it for optimizations that carry invalidation
+  // state this path can act on; until then, any escape is fatal to install.
+  const intptr_t escapes =
+      Smi::Value(Smi::RawCast(FieldAt(thread, entry, kEscapeCount)));
+  if (escapes > 0) {
     return false;
   }
   const intptr_t current_version =
@@ -1282,6 +1389,16 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
     // MAOT-3 compiler-path evidence. A declaration with zero emitted indirect
     // call sites has no caller that can reach its descriptor, whatever the
     // program prints.
+    {
+      const auto& why = String::Handle(zone,
+          String::RawCast(FieldAt(thread, i, kEscapeReason)));
+      const intptr_t n =
+          Smi::Value(Smi::RawCast(FieldAt(thread, i, kEscapeCount)));
+      writer.PrintProperty64("optimizer_escapes", n);
+      writer.PrintProperty("first_escape_reason",
+                           why.IsNull() ? "<none>" : why.ToCString());
+      writer.PrintPropertyBool("installable", n == 0);
+    }
     writer.PrintProperty64(
         "indirect_call_sites_emitted",
         Smi::Value(Smi::RawCast(FieldAt(thread, i, kCallSiteCount))));
