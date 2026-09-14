@@ -1741,6 +1741,10 @@ void Precompiler::MaterializeMutableAotRegistry() {
       intptr_t escapes = 0;
       auto& why = String::Handle(Z);
       MaotRegistry::EscapeStateFor(T, fn, &escapes, &why);
+      if (FLAG_maot_drop_escape_state_at_materialization) {
+        escapes = 0;
+        why = String::null();
+      }
       keep_escapes.Add(escapes);
       keep_escape_reasons.Add(&String::ZoneHandle(Z, why.ptr()));
     }

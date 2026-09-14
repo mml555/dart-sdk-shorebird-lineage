@@ -59,6 +59,9 @@ namespace dart {
 DECLARE_FLAG(charp, maot_dump_registry);
 DECLARE_FLAG(charp, maot_probe_resolvers);
 DECLARE_FLAG(bool, maot_disable_call_indirection);
+DECLARE_FLAG(bool, maot_disable_escape_detection);
+DECLARE_FLAG(bool, maot_ignore_escapes_on_install);
+DECLARE_FLAG(bool, maot_drop_escape_state_at_materialization);
 DECLARE_FLAG(charp, maot_namespace);
 DECLARE_FLAG(bool, maot_trace_registration);
 DECLARE_FLAG(bool, maot_disable_seeding);
@@ -172,6 +175,47 @@ class MaotRegistry : public AllStatic {
   // Whether `function` is a selected Mutable-AOT declaration. Used by the
   // inliner to refuse to inline through the mutable boundary.
   static bool IsMutableDeclaration(Thread* thread, const Function& function);
+
+  // --- MAOT-4 (#68): the optimizer decision record ------------------------
+  //
+  // Every optimizer decision touching a mutable declaration is recorded with
+  // a DISPOSITION, and the disposition is what the install path reads. A
+  // count alone says how many; it does not say whether any of them was
+  // allowed to happen.
+  enum Disposition {
+    // The optimization would erase the boundary and is refused outright.
+    kForbidden = 0,
+    // The optimization happened and the resulting path still loads the
+    // dispatch cell -- devirtualization into a static call, for instance.
+    kSlotPreserving,
+    // Allowed only once it carries invalidation state the install path can
+    // act on. #68 Phase B; nothing produces this yet.
+    kDependencyRequired,
+    // Nobody has decided. Blocks installation, because "we did not think
+    // about it" is not a safety argument.
+    kUnmodeledBlocking,
+  };
+
+  static const char* DispositionName(Disposition d);
+
+  // Records one decision. `caller_id` is the caller's #65 DeclarationId when
+  // the caller is itself an indexed declaration, and a clearly-labelled
+  // diagnostic otherwise -- no decision binds on it.
+  static void NoteDecision(Thread* thread,
+                           const String& declaration_id,
+                           const String& caller_id,
+                           const char* optimization_class,
+                           const char* decision,
+                           Disposition disposition);
+
+  // The DeclarationId bound to `function` whether or not it is selected --
+  // kernel loading indexes every member, so a caller has a real #65 identity
+  // during compilation even when it is not itself mutable.
+  static StringPtr AnyDeclarationIdOf(Thread* thread,
+                                      const Function& function);
+
+  static intptr_t DecisionCount(Thread* thread);
+  static void ClearDecisions(Thread* thread);
 
   // MAOT-4 (#68): records that a compiler decision may have produced an
   // executable path which does not consult the dispatch cell. Any escape

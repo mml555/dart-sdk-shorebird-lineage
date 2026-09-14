@@ -295,6 +295,7 @@ class ObjectPointerVisitor;
   /* every following offset shifts and CheckOffsets aborts gen_snapshot.   */ \
   RW(GrowableObjectArray, maot_registry)                                       \
   RW(String, maot_namespace)                                                   \
+  RW(GrowableObjectArray, maot_decisions)                                      \
   RW(Code, slow_tts_stub)                                                      \
   /* Roots for JIT/AOT snapshots are up until here (see to_snapshot() below)*/ \
   RW(Code, await_stub)                                                         \

@@ -430,6 +430,17 @@ void FlowGraphCompiler::GenerateStaticDartCall(intptr_t deopt_id,
         zone(), MaotRegistry::DispatchCellForFunction(thread(), target));
     if (!cell.IsNull()) {
       MaotRegistry::NoteCallSiteEmitted(thread(), target);
+      // Positive evidence: this optimization path kept the boundary. It is
+      // recorded for the same reason the refusals are -- a lane that only
+      // logs its failures cannot show that the successes were decisions.
+      MaotRegistry::NoteDecision(
+          thread(),
+          String::Handle(zone(),
+                         MaotRegistry::DeclarationIdOf(thread(), target)),
+          String::Handle(zone(),
+                         MaotRegistry::AnyDeclarationIdOf(thread(), function())),
+          "static-call-lowering", "dispatch-cell indirection emitted",
+          MaotRegistry::kSlotPreserving);
       if (FLAG_maot_trace_registration) {
         OS::PrintErr("[maot] indirect call site for %s\n", target.ToCString());
       }
@@ -459,14 +470,20 @@ void FlowGraphCompiler::GenerateStaticDartCall(intptr_t deopt_id,
   // means this call site will reach whatever the release bound, forever. Say
   // so in the descriptor: StageReplacement refuses while any escape stands,
   // so the caller becomes an install refusal instead of a silent bypass.
-  if (FLAG_precompiled_mode &&
+  if (FLAG_precompiled_mode && !FLAG_maot_disable_escape_detection &&
       MaotRegistry::IsMutableDeclaration(thread(), target)) {
-    MaotRegistry::NoteEscape(
-        thread(), target,
+    MaotRegistry::NoteDecision(
+        thread(),
+        String::Handle(zone(),
+                       MaotRegistry::DeclarationIdOf(thread(), target)),
+        String::Handle(zone(),
+                       MaotRegistry::AnyDeclarationIdOf(thread(), function())),
+        "static-call-lowering",
         FLAG_maot_disable_call_indirection
             ? "static call emitted without the dispatch-cell indirection "
               "(--maot_disable_call_indirection)"
-            : "static call emitted without the dispatch-cell indirection");
+            : "static call emitted without the dispatch-cell indirection",
+        MaotRegistry::kForbidden);
   }
 
 #if defined(DART_DYNAMIC_MODULES)

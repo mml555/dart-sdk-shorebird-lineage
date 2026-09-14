@@ -4,6 +4,8 @@
 
 #include "vm/compiler/frontend/kernel_binary_flowgraph.h"
 
+#include "vm/maot_registry.h"
+
 #include "vm/closure_functions_cache.h"
 #include "vm/compiler/ffi/callback.h"
 #include "vm/compiler/ffi/recognized_method.h"
@@ -3382,6 +3384,28 @@ Fragment StreamingFlowGraphBuilder::BuildStaticInvocation(TokenPosition* p) {
   const Function& target =
       Function::ZoneHandle(Z, H.LookupStaticMethodByKernelProcedure(
                                   procedure_reference, /*required=*/false));
+
+  // MUTABLE-AOT (#68). A constant RESULT attached to a call whose target is a
+  // mutable declaration is the historical defect in this program: the call is
+  // still emitted, still reaches the dispatch cell, and the caller uses the
+  // folded release answer anyway. Path evidence looks perfect while the
+  // program ignores every replacement.
+  //
+  // The front end suppresses the constant; this is the VM refusing to trust
+  // that it did. Recording the decision makes StageReplacement refuse, so the
+  // defect becomes an install refusal instead of a descriptor that lies.
+  if (FLAG_precompiled_mode && !target.IsNull() && result_type.IsConstant() &&
+      MaotRegistry::IsMutableDeclaration(thread(), target)) {
+    MaotRegistry::NoteDecision(
+        thread(),
+        String::Handle(Z, MaotRegistry::DeclarationIdOf(thread(), target)),
+        String::Handle(Z, MaotRegistry::AnyDeclarationIdOf(
+                              thread(), parsed_function()->function())),
+        "constant-folding",
+        "a constant result was inferred for a mutable call, so the caller "
+        "would use the release answer without consulting the dispatch cell",
+        MaotRegistry::kForbidden);
+  }
 
   if (target.IsNull()) {
     Fragment instructions;

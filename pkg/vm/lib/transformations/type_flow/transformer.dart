@@ -5,6 +5,8 @@
 /// Transformations based on type flow analysis.
 library;
 
+import 'dart:io' show Platform;
+
 import 'dart:core' hide Type;
 
 import 'package:kernel/maot_identity.dart';
@@ -618,7 +620,7 @@ class AnnotateKernel extends RecursiveVisitor {
         skipCheck ||
         receiverNotInt ||
         closureMember != null) {
-      if (suppressConstant) {
+      if (suppressConstant && !_maotAllowConstantFolding) {
         // MUTABLE-AOT (#67), conservative posture. A selected declaration's
         // body can be replaced at run time, so what it returns TODAY is not
         // what it returns. Handing the compiler a constant here lets it keep
@@ -686,7 +688,18 @@ class AnnotateKernel extends RecursiveVisitor {
     _unreachableNodeMetadata.mapping[node] = const UnreachableNode();
   }
 
-  /// Whether this call site invokes a Mutable-AOT selected declaration.
+  /// FALSIFICATION CONTROL, read once from the environment.
+///
+/// Re-enables constant folding through a mutable boundary -- the defect that
+/// actually shipped once: eleven indirect call sites were emitted, every one
+/// reached the dispatch cell, and every caller still printed the release
+/// answer because the RESULT had been folded to a constant. It is an
+/// environment variable rather than a VM flag because this code runs inside
+/// gen_kernel, which does not take VM flags.
+final bool _maotAllowConstantFolding =
+    Platform.environment['MAOT_ALLOW_CONSTANT_FOLDING'] == '1';
+
+/// Whether this call site invokes a Mutable-AOT selected declaration.
   ///
   /// The direct target is what matters: an interface target says what the
   /// source named, and #67 covers only direct/static calls.
