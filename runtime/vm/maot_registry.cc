@@ -43,6 +43,28 @@ DEFINE_FLAG(bool,
             "look.");
 
 DEFINE_FLAG(bool,
+            maot_disable_escape_detection,
+            false,
+            "FALSIFICATION CONTROL. Do not record optimizer escapes, so a "
+            "bypass proceeds undetected and installation is allowed. Shows "
+            "that the detection is what turns a bypass into a refusal.");
+
+DEFINE_FLAG(bool,
+            maot_ignore_escapes_on_install,
+            false,
+            "FALSIFICATION CONTROL. Record escapes but do not let "
+            "StageReplacement consume them. Shows that producing the metadata "
+            "is not the same as a decision reading it -- the exact defect the "
+            "'which decision reads this?' rule exists to prevent.");
+
+DEFINE_FLAG(bool,
+            maot_drop_escape_state_at_materialization,
+            false,
+            "FALSIFICATION CONTROL. Do not carry escape state across the "
+            "rebuild of the registry, silently re-opening every declaration "
+            "the optimizer had disqualified. This defect was real once.");
+
+DEFINE_FLAG(bool,
             maot_materialize_unselected,
             false,
             "FALSIFICATION CONTROL. Let unselected declarations into the "
@@ -420,6 +442,109 @@ bool MaotRegistry::IsMutableDeclaration(Thread* thread,
   return DispatchCellForFunction(thread, function) != Array::null();
 }
 
+// One record is six slots. A struct would need a heap class, a class id and a
+// serialization cluster -- the same three files #66 decided not to touch, for
+// the same reason.
+static constexpr intptr_t kDecisionSlots = 6;
+enum DecisionField {
+  kDecDeclarationId = 0,
+  kDecCallerId,
+  kDecClass,
+  kDecDecision,
+  kDecDisposition,
+  kDecConsumedBy,
+};
+
+const char* MaotRegistry::DispositionName(Disposition d) {
+  switch (d) {
+    case kForbidden: return "FORBIDDEN";
+    case kSlotPreserving: return "SLOT_PRESERVING";
+    case kDependencyRequired: return "DEPENDENCY_REQUIRED";
+    case kUnmodeledBlocking: return "UNMODELED_BLOCKING";
+  }
+  return "UNKNOWN";
+}
+
+static GrowableObjectArrayPtr EnsureDecisions(Thread* thread) {
+  auto* object_store = thread->isolate_group()->object_store();
+  if (object_store->maot_decisions() == GrowableObjectArray::null()) {
+    object_store->set_maot_decisions(GrowableObjectArray::Handle(
+        thread->zone(), GrowableObjectArray::New(Heap::kOld)));
+  }
+  return object_store->maot_decisions();
+}
+
+intptr_t MaotRegistry::DecisionCount(Thread* thread) {
+  const auto& storage =
+      GrowableObjectArray::Handle(thread->zone(), EnsureDecisions(thread));
+  return storage.Length() / kDecisionSlots;
+}
+
+void MaotRegistry::ClearDecisions(Thread* thread) {
+  // Replace the storage, never SetLength(0): the backing Array keeps every
+  // slot past the new length, and both the GC and the serializer walk the
+  // backing array. #66 paid for that lesson once.
+  thread->isolate_group()->object_store()->set_maot_decisions(
+      GrowableObjectArray::Handle(thread->zone(),
+                                  GrowableObjectArray::New(Heap::kOld)));
+}
+
+void MaotRegistry::NoteDecision(Thread* thread,
+                                const String& declaration_id,
+                                const String& caller_id,
+                                const char* optimization_class,
+                                const char* decision,
+                                Disposition disposition) {
+  if (declaration_id.IsNull()) return;
+  Zone* zone = thread->zone();
+  const auto& storage =
+      GrowableObjectArray::Handle(zone, EnsureDecisions(thread));
+  storage.Add(declaration_id, Heap::kOld);
+  storage.Add(caller_id.IsNull()
+                  ? String::Handle(zone, String::New("<diagnostic:unindexed "
+                                                     "caller>", Heap::kOld))
+                  : caller_id,
+              Heap::kOld);
+  storage.Add(String::Handle(zone, String::New(optimization_class, Heap::kOld)),
+              Heap::kOld);
+  storage.Add(String::Handle(zone, String::New(decision, Heap::kOld)),
+              Heap::kOld);
+  storage.Add(String::Handle(zone,
+                             String::New(DispositionName(disposition),
+                                         Heap::kOld)),
+              Heap::kOld);
+  // Which decision reads this record. Recorded ON the record so a reader can
+  // check the claim rather than take the lane's word for it.
+  storage.Add(
+      String::Handle(zone, String::New(
+          (disposition == kForbidden || disposition == kUnmodeledBlocking)
+              ? "MaotRegistry::StageReplacement refuses installation while "
+                "this disposition stands"
+              : "no install decision reads a slot-preserving record; it is "
+                "positive evidence that the boundary survived",
+          Heap::kOld)),
+      Heap::kOld);
+
+  if (disposition == kForbidden || disposition == kUnmodeledBlocking) {
+    NoteEscapeById(thread, declaration_id, decision);
+  }
+}
+
+StringPtr MaotRegistry::AnyDeclarationIdOf(Thread* thread,
+                                           const Function& function) {
+  if (function.IsNull()) return String::null();
+  Zone* zone = thread->zone();
+  const intptr_t entries = Length(thread);
+  auto& candidate = Function::Handle(zone);
+  for (intptr_t i = 0; i < entries; i++) {
+    candidate ^= FieldAt(thread, i, kCurrentImpl);
+    if (candidate.ptr() == function.ptr()) {
+      return String::RawCast(FieldAt(thread, i, kDeclarationId));
+    }
+  }
+  return String::null();
+}
+
 StringPtr MaotRegistry::DeclarationIdOf(Thread* thread,
                                         const Function& function) {
   if (function.IsNull()) return String::null();
@@ -708,7 +833,7 @@ bool MaotRegistry::StageReplacement(Thread* thread,
   // state this path can act on; until then, any escape is fatal to install.
   const intptr_t escapes =
       Smi::Value(Smi::RawCast(FieldAt(thread, entry, kEscapeCount)));
-  if (escapes > 0) {
+  if (escapes > 0 && !FLAG_maot_ignore_escapes_on_install) {
     return false;
   }
   const intptr_t current_version =
@@ -1462,6 +1587,31 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
     writer.CloseObject();
   }
   writer.CloseArray();
+
+  // MAOT-4 (#68): the optimizer decision record. Each entry names the mutable
+  // declaration, the caller, the optimization class, the decision, its
+  // disposition, and which decision consumes it.
+  writer.OpenArray("optimizer_decisions");
+  {
+    const auto& decisions =
+        GrowableObjectArray::Handle(zone, EnsureDecisions(thread));
+    auto& field = String::Handle(zone);
+    const intptr_t n = decisions.Length() / kDecisionSlots;
+    for (intptr_t i = 0; i < n; i++) {
+      writer.OpenObject();
+      static const char* const kNames[kDecisionSlots] = {
+          "declaration_id", "caller_id", "optimization_class",
+          "decision", "disposition", "consumed_by"};
+      for (intptr_t f = 0; f < kDecisionSlots; f++) {
+        field ^= decisions.At(i * kDecisionSlots + f);
+        writer.PrintProperty(kNames[f],
+                             field.IsNull() ? "<absent>" : field.ToCString());
+      }
+      writer.CloseObject();
+    }
+  }
+  writer.CloseArray();
+  writer.PrintProperty64("optimizer_decision_count", DecisionCount(thread));
   writer.CloseObject();
 
   auto* file = fopen(path, "w");

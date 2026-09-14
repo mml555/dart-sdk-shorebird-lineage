@@ -223,6 +223,7 @@ class ObjectPointerVisitor;
   /* applies: 3.13.7 exports no ObjectStore field offsets.                 */ \
   RW(GrowableObjectArray, maot_registry)                                       \
   RW(String, maot_namespace)                                                   \
+  RW(GrowableObjectArray, maot_decisions)                                      \
   RW(Array, ffi_callback_functions)                                            \
   /* Roots for JIT/AOT snapshots are up until here (see to_snapshot() below)*/ \
   RW(Array, dispatch_table_code_entries)                                       \
