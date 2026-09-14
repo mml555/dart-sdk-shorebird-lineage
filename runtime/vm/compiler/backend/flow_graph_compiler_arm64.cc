@@ -455,6 +455,20 @@ void FlowGraphCompiler::GenerateStaticDartCall(intptr_t deopt_id,
     }
   }
 
+  // MAOT-4 (#68). Falling through to an ordinary call for a MUTABLE target
+  // means this call site will reach whatever the release bound, forever. Say
+  // so in the descriptor: StageReplacement refuses while any escape stands,
+  // so the caller becomes an install refusal instead of a silent bypass.
+  if (FLAG_precompiled_mode &&
+      MaotRegistry::IsMutableDeclaration(thread(), target)) {
+    MaotRegistry::NoteEscape(
+        thread(), target,
+        FLAG_maot_disable_call_indirection
+            ? "static call emitted without the dispatch-cell indirection "
+              "(--maot_disable_call_indirection)"
+            : "static call emitted without the dispatch-cell indirection");
+  }
+
 #if defined(DART_DYNAMIC_MODULES)
   if (FLAG_precompiled_mode && FLAG_patchable_static_calls) {
     // Route B: the third call form. The two below both resolve the callee at

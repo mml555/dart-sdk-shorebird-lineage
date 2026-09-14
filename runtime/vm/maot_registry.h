@@ -173,6 +173,34 @@ class MaotRegistry : public AllStatic {
   // inliner to refuse to inline through the mutable boundary.
   static bool IsMutableDeclaration(Thread* thread, const Function& function);
 
+  // MAOT-4 (#68): records that a compiler decision may have produced an
+  // executable path which does not consult the dispatch cell. Any escape
+  // makes the declaration un-installable until #68 Phase B gives the
+  // optimization machine-consumed invalidation state.
+  static void NoteEscape(Thread* thread,
+                         const Function& function,
+                         const char* reason);
+  static void NoteEscapeById(Thread* thread,
+                             const String& declaration_id,
+                             const char* reason);
+  static intptr_t EscapeCountFor(Thread* thread, const String& declaration_id);
+
+  // Escape accounting is gathered DURING code generation and therefore has to
+  // survive the rebuild of the table at materialization -- the call-site
+  // counter had to learn the same lesson.
+  static void EscapeStateFor(Thread* thread,
+                             const Function& function,
+                             intptr_t* count,
+                             String* reason);
+  static void SetEscapeStateFor(Thread* thread,
+                                const String& declaration_id,
+                                intptr_t count,
+                                const String& reason);
+
+  // The DeclarationId bound to `function`, or null when it is not a selected
+  // Mutable-AOT declaration.
+  static StringPtr DeclarationIdOf(Thread* thread, const Function& function);
+
   // Records that one more indirect call site was emitted for `function`.
   static void NoteCallSiteEmitted(Thread* thread, const Function& function);
 
@@ -331,6 +359,15 @@ class MaotRegistry : public AllStatic {
     kCurrentImplId,       // String
     kReleaseImplId,       // String
     kStagedImplId,        // String or null
+    // MAOT-4 (#68). How many compiler decisions were made that could let a
+    // caller reach an implementation without consulting the dispatch cell,
+    // and why the first of them happened.
+    //
+    // This is NOT a statistic. StageReplacement refuses while it is non-zero,
+    // so an escape is a fail-closed install refusal rather than a number in a
+    // log -- which is the difference between evidence and decoration.
+    kEscapeCount,         // Smi
+    kEscapeReason,        // String or null
     kStagedKind,          // Smi, or -1 when nothing staged
     kStagedVersion,       // Smi
     kStagedImpl,          // Function or null

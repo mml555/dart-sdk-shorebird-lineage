@@ -1626,6 +1626,18 @@ void Precompiler::SeedMutableAotRoots() {
                    had_code_before ? 1 : 0,
                    (!already_possibly_retained && !already_seen) ? 1 : 0);
     }
+#if !defined(TARGET_ARCH_ARM64)
+    // MAOT-4 (#68). The dispatch-cell lowering exists only in
+    // flow_graph_compiler_arm64.cc. On any other target every static call to
+    // this declaration is an ordinary bound call, so the declaration is not
+    // replaceable -- and that has to be enforced, not documented. Recording
+    // the escape makes StageReplacement refuse, which turns "arm64 only" from
+    // a caveat in a document into a fail-closed property of the artifact.
+    MaotRegistry::NoteEscapeById(
+        T, String::Handle(Z, MaotRegistry::DeclarationIdOf(T, fn)),
+        "no Mutable-AOT call lowering for this target architecture");
+#endif
+
     // MAOT-3 (#67), conservative posture: a selected declaration may not be
     // inlined. An inlined copy is a caller that never reaches the dispatch
     // cell, so installation would be invisible to it -- the exact defect the
@@ -1666,6 +1678,8 @@ void Precompiler::MaterializeMutableAotRegistry() {
   GrowableArray<const String*> keep_call_convs;
   GrowableArray<const Array*> keep_cells;
   GrowableArray<intptr_t> keep_call_sites;
+  GrowableArray<intptr_t> keep_escapes;
+  GrowableArray<const String*> keep_escape_reasons;
   GrowableArray<bool> keep_selected;
   intptr_t selected_seen = 0;
   intptr_t dropped = 0;
@@ -1720,6 +1734,16 @@ void Precompiler::MaterializeMutableAotRegistry() {
     // after it. Re-registering without it reported zero emitted call sites
     // for declarations that had eleven.
     keep_call_sites.Add(MaotRegistry::CallSiteCountFor(T, fn));
+    // Escape accounting is compiler-path evidence too, and it is CONSUMED by
+    // the install decision -- losing it here would silently re-open every
+    // declaration the optimizer had disqualified.
+    {
+      intptr_t escapes = 0;
+      auto& why = String::Handle(Z);
+      MaotRegistry::EscapeStateFor(T, fn, &escapes, &why);
+      keep_escapes.Add(escapes);
+      keep_escape_reasons.Add(&String::ZoneHandle(Z, why.ptr()));
+    }
     // Carry the real flag through. Rewriting it to true would make the
     // --maot_materialize_unselected falsification unable to show the defect it
     // exists to show: an unselected declaration holding an authoritative slot.
@@ -1733,6 +1757,8 @@ void Precompiler::MaterializeMutableAotRegistry() {
                                           *keep_call_convs[i], *keep_cells[i],
                                           *keep_ids[i]);
     MaotRegistry::SetCallSiteCountFor(T, *keep_ids[i], keep_call_sites[i]);
+    MaotRegistry::SetEscapeStateFor(T, *keep_ids[i], keep_escapes[i],
+                                    *keep_escape_reasons[i]);
     ASSERT(ok);
   }
   MaotRegistry::SetMaterializationStats(selected_seen, keep_ids.length(),
