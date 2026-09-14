@@ -310,6 +310,10 @@ class StreamingFlowGraphBuilder : public KernelReaderHelper {
   Fragment BuildEqualsNull(TokenPosition* position);
   Fragment BuildSuperMethodInvocation(TokenPosition* position);
   Fragment BuildStaticInvocation(TokenPosition* position);
+
+  // MAOT-4 (#68): records that AOT turned an instance call into a static call
+  // on TFA's direct-call metadata, for a mutable target.
+  void NoteMaotDevirtualization(const Function& target);
   Fragment BuildConstructorInvocation(TokenPosition* position);
   Fragment BuildNot(TokenPosition* position);
   Fragment BuildNullCheck(TokenPosition* position);

@@ -2247,6 +2247,7 @@ Fragment StreamingFlowGraphBuilder::BuildInstanceGet(TokenPosition* p) {
 
   if (!direct_call.target_.IsNull()) {
     ASSERT(CompilerState::Current().is_aot());
+    NoteMaotDevirtualization(direct_call.target_);
     instructions +=
         StaticCall(position, direct_call.target_, 1, Array::null_array(),
                    ICData::kNoRebind, &result_type);
@@ -2332,6 +2333,7 @@ Fragment StreamingFlowGraphBuilder::BuildInstanceTearOff(TokenPosition* p) {
 
   if (!direct_call.target_.IsNull()) {
     ASSERT(CompilerState::Current().is_aot());
+    NoteMaotDevirtualization(direct_call.target_);
     instructions +=
         StaticCall(position, direct_call.target_, 1, Array::null_array(),
                    ICData::kNoRebind, &result_type);
@@ -2401,6 +2403,7 @@ Fragment StreamingFlowGraphBuilder::BuildInstanceSet(TokenPosition* p) {
   }
 
   if (!direct_call.target_.IsNull()) {
+    NoteMaotDevirtualization(direct_call.target_);
     ASSERT(CompilerState::Current().is_aot());
     instructions +=
         StaticCall(position, direct_call.target_, 2, Array::null_array(),
@@ -3203,6 +3206,7 @@ Fragment StreamingFlowGraphBuilder::BuildEqualsCall(TokenPosition* p) {
   const intptr_t kNumCheckedArgs = 2;
 
   if (!direct_call.target_.IsNull()) {
+    NoteMaotDevirtualization(direct_call.target_);
     ASSERT(CompilerState::Current().is_aot());
     instructions +=
         StaticCall(position, direct_call.target_, kNumArgs, Array::null_array(),
@@ -3368,6 +3372,36 @@ Fragment StreamingFlowGraphBuilder::BuildSuperMethodInvocation(
                       &result_type, type_args_len,
                       /*use_unchecked_entry=*/true);
   }
+}
+
+
+// MUTABLE-AOT (#68). AOT devirtualizes through DirectCallMetadata, which TFA
+// attaches when it proves a single target -- not through the inliner's
+// TryDevirtualize, which is where this was first hooked and never fired. The
+// transformation is recorded where it actually happens.
+//
+// SLOT_PRESERVING, and only because the StaticCall this produces is then
+// lowered through the dispatch cell by a separate decision recorded at
+// emission. The two records name the same target and caller, so a reader can
+// join them and see the whole path instead of trusting either alone.
+//
+// This is optimizer scaffolding. It says nothing about virtual, interface or
+// super DISPATCH, which #69 owns: it says that when the optimizer REMOVES a
+// virtual call, what replaces it still goes through the slot.
+void StreamingFlowGraphBuilder::NoteMaotDevirtualization(
+    const Function& target) {
+  if (!FLAG_precompiled_mode || target.IsNull()) return;
+  if (!MaotRegistry::IsMutableDeclaration(thread(), target)) return;
+  MaotRegistry::NoteDecision(
+      thread(),
+      String::Handle(Z, MaotRegistry::DeclarationIdOf(thread(), target)),
+      String::Handle(Z, MaotRegistry::AnyDeclarationIdOf(
+                            thread(), parsed_function()->function())),
+      "devirtualization",
+      "an instance call was devirtualized into a static call on TFA's "
+      "direct-call metadata, and that static call is lowered through the "
+      "dispatch cell",
+      MaotRegistry::kSlotPreserving);
 }
 
 Fragment StreamingFlowGraphBuilder::BuildStaticInvocation(TokenPosition* p) {

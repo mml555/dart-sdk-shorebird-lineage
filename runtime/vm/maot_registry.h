@@ -62,6 +62,7 @@ DECLARE_FLAG(bool, maot_disable_call_indirection);
 DECLARE_FLAG(bool, maot_disable_escape_detection);
 DECLARE_FLAG(bool, maot_ignore_escapes_on_install);
 DECLARE_FLAG(bool, maot_drop_escape_state_at_materialization);
+DECLARE_FLAG(charp, maot_inject_disposition);
 DECLARE_FLAG(charp, maot_namespace);
 DECLARE_FLAG(bool, maot_trace_registration);
 DECLARE_FLAG(bool, maot_disable_seeding);
@@ -189,7 +190,9 @@ class MaotRegistry : public AllStatic {
     // dispatch cell -- devirtualization into a static call, for instance.
     kSlotPreserving,
     // Allowed only once it carries invalidation state the install path can
-    // act on. #68 Phase B; nothing produces this yet.
+    // act on. #68 Phase B; nothing produces this yet -- and because nothing
+    // does, it FAILS CLOSED exactly like kUnmodeledBlocking. See
+    // BlocksInstallation.
     kDependencyRequired,
     // Nobody has decided. Blocks installation, because "we did not think
     // about it" is not a safety argument.
@@ -197,6 +200,12 @@ class MaotRegistry : public AllStatic {
   };
 
   static const char* DispositionName(Disposition d);
+
+  // Whether a disposition blocks installation. kDependencyRequired does, in
+  // Phase A: its own meaning is "allowed once it carries invalidation state
+  // the install path can act on", and until that state and its consumer both
+  // exist, admitting it would be admitting an optimization on a promise.
+  static bool BlocksInstallation(Disposition d);
 
   // Records one decision. `caller_id` is the caller's #65 DeclarationId when
   // the caller is itself an indexed declaration, and a clearly-labelled

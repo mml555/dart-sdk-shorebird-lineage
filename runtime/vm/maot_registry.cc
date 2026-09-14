@@ -64,6 +64,15 @@ DEFINE_FLAG(bool,
             "rebuild of the registry, silently re-opening every declaration "
             "the optimizer had disqualified. This defect was real once.");
 
+DEFINE_FLAG(charp,
+            maot_inject_disposition,
+            nullptr,
+            "FALSIFICATION CONTROL. Record one optimizer decision with the "
+            "named disposition (FORBIDDEN, SLOT_PRESERVING, "
+            "DEPENDENCY_REQUIRED or UNMODELED_BLOCKING) against every selected "
+            "declaration, so each disposition's install consequence can be "
+            "measured rather than argued from the enum.");
+
 DEFINE_FLAG(bool,
             maot_materialize_unselected,
             false,
@@ -455,6 +464,33 @@ enum DecisionField {
   kDecConsumedBy,
 };
 
+bool MaotRegistry::BlocksInstallation(Disposition d) {
+  switch (d) {
+    case kForbidden:
+      return true;
+    case kUnmodeledBlocking:
+      // "Nobody decided" is not a safety argument.
+      return true;
+    case kDependencyRequired:
+      // FAILS CLOSED IN PHASE A, and the reason is not caution.
+      //
+      // The disposition's own meaning is "allowed once it carries
+      // invalidation state the install path can act on". Nothing produces
+      // such state yet and no install or deoptimization consumer reads one,
+      // so an optimization admitted under this disposition today would be an
+      // optimization admitted on a promise. Until Phase B has BOTH a real
+      // dependency token and a consumer that demonstrably reads that exact
+      // token, this is indistinguishable from kForbidden and is treated as
+      // such.
+      return true;
+    case kSlotPreserving:
+      // The optimization happened and the resulting path still loads the
+      // dispatch cell. Nothing to block.
+      return false;
+  }
+  return true;  // an unknown disposition is not a safe one
+}
+
 const char* MaotRegistry::DispositionName(Disposition d) {
   switch (d) {
     case kForbidden: return "FORBIDDEN";
@@ -514,18 +550,23 @@ void MaotRegistry::NoteDecision(Thread* thread,
                                          Heap::kOld)),
               Heap::kOld);
   // Which decision reads this record. Recorded ON the record so a reader can
-  // check the claim rather than take the lane's word for it.
-  storage.Add(
-      String::Handle(zone, String::New(
-          (disposition == kForbidden || disposition == kUnmodeledBlocking)
-              ? "MaotRegistry::StageReplacement refuses installation while "
-                "this disposition stands"
-              : "no install decision reads a slot-preserving record; it is "
-                "positive evidence that the boundary survived",
-          Heap::kOld)),
-      Heap::kOld);
+  // check the claim rather than take the lane's word for it -- and the string
+  // is DIAGNOSTIC. The proof that a record is consumed is that its escape
+  // projection survives into the descriptor and StageReplacement refuses on
+  // it; a record can outlive its projection, which is exactly what
+  // --maot_drop_escape_state_at_materialization produces.
+  const char* consumed_by =
+      "no install decision reads a slot-preserving record; it is positive "
+      "evidence that the boundary survived";
+  if (BlocksInstallation(disposition)) {
+    consumed_by =
+        "MaotRegistry::StageReplacement refuses installation while this "
+        "disposition stands";
+  }
+  storage.Add(String::Handle(zone, String::New(consumed_by, Heap::kOld)),
+              Heap::kOld);
 
-  if (disposition == kForbidden || disposition == kUnmodeledBlocking) {
+  if (BlocksInstallation(disposition)) {
     NoteEscapeById(thread, declaration_id, decision);
   }
 }
@@ -1072,10 +1113,19 @@ void MaotRegistry::RunSelfTest(Thread* thread, const char* path) {
     return cc1.IsNull() || cc1.Equals(cc2);
   };
 
+  // #68 added a second legitimate reason for StageReplacement to refuse: an
+  // optimizer escape. Staging SEMANTICS cannot be measured on an entry that
+  // refuses for that reason -- the arm would be reading the escape rule and
+  // reporting it as a staging failure. The pair must be installable.
+  auto installable = [&](intptr_t i) {
+    return Smi::Value(Smi::RawCast(FieldAt(thread, i, kEscapeCount))) == 0;
+  };
+
   for (intptr_t i = 0; i < n && !have_pair; i++) {
+    if (!installable(i)) continue;
     EntryAt(thread, i, &id_a, &sel, &fn_a, &abi_a, &cc_a);
     for (intptr_t j = 0; j < n; j++) {
-      if (i == j) continue;
+      if (i == j || !installable(j)) continue;
       EntryAt(thread, j, &id_b, &sel, &fn_b, &abi_b, &cc_b);
       if (compatible(abi_a, cc_a, abi_b, cc_b)) { have_pair = true; break; }
     }
@@ -1383,6 +1433,10 @@ void MaotRegistry::RunSelfTest(Thread* thread, const char* path) {
         w.PrintProperty("from", id_j2.ToCString());
         w.PrintPropertyBool("abi_equal", abi_same);
         w.PrintPropertyBool("call_convention_equal", cc_same);
+        // #68: an optimizer escape is a third, independent reason to refuse.
+        w.PrintPropertyBool(
+            "onto_installable",
+            Smi::Value(Smi::RawCast(FieldAt(thread, i, kEscapeCount))) == 0);
         w.PrintPropertyBool("accepted", accepted);
         w.CloseObject();
       }

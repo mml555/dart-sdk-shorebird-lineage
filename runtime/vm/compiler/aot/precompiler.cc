@@ -3,6 +3,8 @@
 // BSD-style license that can be found in the LICENSE file.
 
 #include "vm/compiler/aot/precompiler.h"
+
+#include <cstring>
 #include "vm/maot_registry.h"
 
 #include <memory>
@@ -1637,6 +1639,51 @@ void Precompiler::SeedMutableAotRoots() {
         T, String::Handle(Z, MaotRegistry::DeclarationIdOf(T, fn)),
         "no Mutable-AOT call lowering for this target architecture");
 #endif
+
+    // MAOT-4 (#68). A selected INSTANCE member can be reached by dispatch
+    // forms this issue does not model -- virtual, interface, super, dynamic,
+    // the dispatch table, inline caches. #67 and #68 own direct/static calls
+    // only; #69 owns dispatch.
+    //
+    // This was found rather than reasoned: an instance method was installed
+    // successfully and every call kept returning the release answer, because
+    // no instance-call path traverses the dispatch cell and no detector here
+    // covered one. Installation succeeded while the program ignored it --
+    // exactly the divergence this issue exists to prevent.
+    //
+    // UNMODELED_BLOCKING is the honest disposition. "We did not model it" is
+    // not a safety argument, so it fails closed until #69 makes it true.
+    if (fn.IsDynamicFunction(/*allow_abstract=*/true) ||
+        fn.IsImplicitInstanceClosureFunction()) {
+      MaotRegistry::NoteDecision(
+          T, String::Handle(Z, MaotRegistry::DeclarationIdOf(T, fn)),
+          String::Handle(Z, MaotRegistry::AnyDeclarationIdOf(T, fn)),
+          "instance-dispatch",
+          "a selected instance member is reachable through dispatch forms "
+          "#68 does not model; #69 owns virtual, interface, super and "
+          "dynamic dispatch",
+          MaotRegistry::kUnmodeledBlocking);
+    }
+
+    // MAOT-4 (#68) falsification control: attribute one decision with the
+    // named disposition to this declaration, so each disposition's effect on
+    // installation is measured rather than argued from the enum.
+    if (FLAG_maot_inject_disposition != nullptr) {
+      const char* want = FLAG_maot_inject_disposition;
+      MaotRegistry::Disposition d = MaotRegistry::kUnmodeledBlocking;
+      if (strcmp(want, "FORBIDDEN") == 0) {
+        d = MaotRegistry::kForbidden;
+      } else if (strcmp(want, "SLOT_PRESERVING") == 0) {
+        d = MaotRegistry::kSlotPreserving;
+      } else if (strcmp(want, "DEPENDENCY_REQUIRED") == 0) {
+        d = MaotRegistry::kDependencyRequired;
+      }
+      MaotRegistry::NoteDecision(
+          T, String::Handle(Z, MaotRegistry::DeclarationIdOf(T, fn)),
+          String::Handle(Z, MaotRegistry::AnyDeclarationIdOf(T, fn)),
+          "injected-control",
+          "disposition injected by --maot_inject_disposition", d);
+    }
 
     // MAOT-3 (#67), conservative posture: a selected declaration may not be
     // inlined. An inlined copy is a caller that never reaches the dispatch

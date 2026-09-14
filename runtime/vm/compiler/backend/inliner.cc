@@ -635,6 +635,35 @@ class CallSites : public ValueObject {
 
   bool HandleDevirtualization(CallInfo<InstanceCallInstr>* call_info,
                               StaticCallInstr* static_call) {
+    // MUTABLE-AOT (#68). Record the TRANSFORMATION, not an inference from it.
+    //
+    // An InstanceCall has just become a StaticCall. For a mutable target that
+    // is SLOT_PRESERVING -- but only because the static-call lowering then
+    // loads the dispatch cell, which is a separate decision recorded at
+    // emission. Both records name the same target and caller, so the gate can
+    // join them and see the whole path rather than trusting either alone.
+    //
+    // This is optimizer scaffolding. It says nothing about virtual, interface
+    // or super DISPATCH, which #69 owns; it says that when the optimizer
+    // removes a virtual call, what replaces it still goes through the slot.
+    if (CompilerState::Current().is_aot()) {
+      Thread* thread = Thread::Current();
+      const Function& target = static_call->function();
+      if (MaotRegistry::IsMutableDeclaration(thread, target)) {
+        Zone* zone = thread->zone();
+        MaotRegistry::NoteDecision(
+            thread,
+            String::Handle(zone,
+                           MaotRegistry::DeclarationIdOf(thread, target)),
+            String::Handle(zone, MaotRegistry::AnyDeclarationIdOf(
+                thread, call_info->caller_graph->function())),
+            "devirtualization",
+            "an instance call was devirtualized into a static call, which is "
+            "then lowered through the dispatch cell",
+            MaotRegistry::kSlotPreserving);
+      }
+    }
+
     // Found devirtualized call and associated information.
     const bool inline_only_profitable_methods =
         (call_info->call_depth >= inlining_depth_threshold_);
