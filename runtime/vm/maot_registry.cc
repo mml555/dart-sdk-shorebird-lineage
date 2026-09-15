@@ -74,6 +74,32 @@ DEFINE_FLAG(charp,
             "measured rather than argued from the enum.");
 
 DEFINE_FLAG(bool,
+            maot_dump_trampoline_shape,
+            false,
+            "DIAGNOSTIC. Before serialization, dump the complete Code shape "
+            "of every #69 trampoline beside a known-good Function-owned AOT "
+            "Code and a known-good stub, so a malformed trampoline is "
+            "distinguished from a same-owner or multiplicity problem by "
+            "comparison rather than by guessing which field to add next.");
+
+DEFINE_FLAG(int,
+            maot_limit_selected,
+            -1,
+            "DIAGNOSTIC. Seed at most N selected declarations, so a "
+            "one-declaration / one-trampoline build can separate a malformed "
+            "trampoline from a problem that only appears with several.");
+
+DEFINE_FLAG(bool,
+            maot_trampoline_class_owner,
+            false,
+            "DIAGNOSTIC ONLY. Give the trampoline a Class owner instead of "
+            "the declaration Function. Success here does NOT establish that "
+            "Function ownership is incompatible with serialization -- every "
+            "Code goes through the same cluster, and the owner also changes "
+            "passes that branch on IsFunctionCode(). It narrows the failure "
+            "to 'some Function-owner-dependent path is implicated'.");
+
+DEFINE_FLAG(bool,
             maot_disable_retention_roots,
             false,
             "FALSIFICATION CONTROL. Seed everything EXCEPT the retention "
