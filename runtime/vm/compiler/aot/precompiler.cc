@@ -1898,12 +1898,22 @@ CodePtr Precompiler::GenerateMaotTrampoline(const Array& cell,
   // macro then tries to call the local pointer.
   if (cell.IsNull() || owner.IsNull()) return Code::null();
 
-  compiler::ObjectPoolBuilder local_pool;
+  // A LOCAL builder PARENTED to the global one, not the global builder
+  // itself. The shape dump earned this: the trampoline was the only Code in
+  // the program with a null object_pool_, while both the body it routes to
+  // and a known-good stub had one.
+  //
+  // Code::FinalizeCode creates a tracking pool under kNotAttachPool only
+  // `if (assembler->object_pool_builder().HasParent())`. Handing it the
+  // global builder -- which is the root and has no parent -- silently
+  // produced a Code with no pool at all, and the serializer died on it.
+  // A parented local builder still emits offsets into the global pool, so
+  // the generated instructions are unchanged.
   Precompiler* precompiler = Precompiler::Instance();
-  compiler::ObjectPoolBuilder* pool =
+  compiler::ObjectPoolBuilder local_pool(
       precompiler != nullptr ? precompiler->global_object_pool_builder()
-                             : &local_pool;
-  compiler::Assembler assembler(pool);
+                             : nullptr);
+  compiler::Assembler assembler(&local_pool);
   CompilerState state(T, /*is_aot=*/true, /*is_optimizing=*/false);
 
   // The monomorphic entry is not decoration. DoUnlinkedCallAOT asserts
