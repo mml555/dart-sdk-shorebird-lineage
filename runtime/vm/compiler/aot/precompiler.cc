@@ -757,6 +757,7 @@ void Precompiler::DoCompileAll() {
       InstallMaotTrampolines();
 
       FinalizeDispatchTable();
+      VerifyMaotDispatchTableTargets();
       ReplaceFunctionStaticCallEntries();
 
       {
@@ -1911,6 +1912,37 @@ void Precompiler::DumpMaotTrampolineShapes() {
   if (g_maot_shape_out != nullptr) {
     fclose(g_maot_shape_out);
     g_maot_shape_out = nullptr;
+  }
+}
+
+void Precompiler::VerifyMaotDispatchTableTargets() {
+  if (!FLAG_maot_install_trampolines) return;
+  if (!FLAG_maot_trace_registration && !FLAG_maot_dump_trampoline_shape) return;
+  // IDENTITY, not behaviour: does the dispatch table -- the structure a real
+  // virtual call actually indexes -- hold this declaration's trampoline as
+  // the executable target? Behavioural evidence that a cell swap is observed
+  // does not by itself say WHICH structure routed the call.
+  const auto& entries = Array::Handle(
+      Z, IG->object_store()->dispatch_table_code_entries());
+  const intptr_t n = MaotRegistry::Length(T);
+  auto& tramp = Code::Handle(Z);
+  auto& slot = Code::Handle(Z);
+  auto& id = String::Handle(Z);
+  for (intptr_t i = 0; i < n; i++) {
+    tramp = MaotRegistry::TrampolineAt(T, i);
+    if (tramp.IsNull()) continue;
+    id = MaotRegistry::DeclarationIdAt(T, i);
+    intptr_t hits = 0;
+    if (!entries.IsNull()) {
+      for (intptr_t j = 0; j < entries.Length(); j++) {
+        slot ^= entries.At(j);
+        if (slot.ptr() == tramp.ptr()) hits++;
+      }
+    }
+    OS::PrintErr("[maot] dispatch-table slots holding the trampoline for "
+                 "%s: %" Pd " (table len %" Pd ")\n",
+                 id.IsNull() ? "<null>" : id.ToCString(), hits,
+                 entries.IsNull() ? -1 : entries.Length());
   }
 }
 

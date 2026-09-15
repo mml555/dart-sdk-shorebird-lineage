@@ -332,6 +332,7 @@ class Precompiler : public ValueObject {
   intptr_t FindCellInGlobalPool(const Array& cell);
   CodePtr GenerateMaotTrampoline(const Array& cell, const Function& owner);
   void InstallMaotTrampolines();
+  void VerifyMaotDispatchTableTargets();
   void DumpMaotTrampolineShapes();
   void RepinMutableAotImplementations();
   void AddInstantiatedClass(const Class& cls);
