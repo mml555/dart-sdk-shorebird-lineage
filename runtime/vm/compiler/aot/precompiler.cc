@@ -1942,85 +1942,84 @@ void Precompiler::InstallMaotTrampolines() {
 CodePtr Precompiler::GenerateMaotTrampoline(const Array& cell,
                                             const Function& owner) {
 #if defined(TARGET_ARCH_ARM64) && defined(DART_PRECOMPILER)
-  // No locals named `thread` or `zone` here: T and Z expand to thread() and
-  // zone(), so a local of either name shadows the member function and the
-  // macro then tries to call the local pointer.
   if (cell.IsNull() || owner.IsNull()) return Code::null();
 
-  // A LOCAL builder PARENTED to the global one, not the global builder
-  // itself. The shape dump earned this: the trampoline was the only Code in
-  // the program with a null object_pool_, while both the body it routes to
-  // and a known-good stub had one.
+  // Use the intermediary-pool mechanism the way normal compilation uses it.
   //
-  // Code::FinalizeCode creates a tracking pool under kNotAttachPool only
-  // `if (assembler->object_pool_builder().HasParent())`. Handing it the
-  // global builder -- which is the root and has no parent -- silently
-  // produced a Code with no pool at all, and the serializer died on it.
-  // A parented local builder still emits offsets into the global pool, so
-  // the generated instructions are unchanged.
-  Precompiler* precompiler = Precompiler::Instance();
-  compiler::ObjectPoolBuilder local_pool(
-      precompiler != nullptr ? precompiler->global_object_pool_builder()
-                             : nullptr);
-  compiler::Assembler assembler(&local_pool);
-  CompilerState state(T, /*is_aot=*/true, /*is_optimizing=*/false);
+  // Objects accumulate in a local builder parented to the global pool, and
+  // TryCommitToParent() merges them in afterwards. Committing is what makes
+  // the NEXT builder's base_index_ advance. Skipping the commit left every
+  // trampoline's builder with the same base_index_, every cell at local index
+  // 0, and therefore the same encoded pool offset -- identical instruction
+  // bytes for every declaration, which ProgramVisitor::Dedup then merged into
+  // a single Code. One Code shared by N declarations branches through ONE
+  // cell, so the per-declaration binding was destroyed before serialization
+  // ever came into it.
+  //
+  // The commit can fail if the global pool grew during generation (nested
+  // code generation). Normal compilation retries; so does this.
+  auto& code = Code::Handle(Z);
+  for (intptr_t attempt = 0; attempt < 4; attempt++) {
+    compiler::ObjectPoolBuilder local_pool(global_object_pool_builder());
+    compiler::Assembler assembler(&local_pool);
+    CompilerState state(T, /*is_aot=*/true, /*is_optimizing=*/false);
 
-  // The monomorphic entry is not decoration. DoUnlinkedCallAOT asserts
-  // code.HasMonomorphicEntry() before patching a call site to the
-  // monomorphic state, and in AOT that predicate is
-  // entry_point_ != monomorphic_entry_point_ -- which only this prologue
-  // produces.
-  // A fresh Assembler starts with the constant pool disallowed, so
-  // LoadUniqueObject fails CanLoadFromObjectPool. In AOT the global pool is
-  // live in its own register for the whole program, so it is allowed here.
-  assembler.set_constant_pool_allowed(true);
+    // A fresh Assembler starts with the constant pool disallowed, so
+    // LoadUniqueObject would fail CanLoadFromObjectPool. In AOT the global
+    // pool is live in its own register for the whole program.
+    assembler.set_constant_pool_allowed(true);
 
-  assembler.MonomorphicCheckedEntryAOT();
+    // The monomorphic entry is not decoration: DoUnlinkedCallAOT asserts
+    // code.HasMonomorphicEntry() before patching a call site to the
+    // monomorphic state, and in AOT that predicate is
+    // entry_point_ != monomorphic_entry_point_, which only this produces.
+    assembler.MonomorphicCheckedEntryAOT();
 
-  // Branch through the cell's CODE half, never its Function half. Going via
-  // cell[kCellImplFunction]'s entry point would return here: this trampoline
-  // IS that Function's CurrentCode in release state, so the load would be a
-  // self-cycle and every mutable call would recurse forever.
-  // CODE_REG is the scratch AND the destination, on purpose. TMP must not be
-  // used to hold anything across a macro-assembler call: LoadUniqueObject and
-  // LoadCompressed use TMP as their own scratch, so a value parked there is
-  // silently clobbered and the final branch jumps to a tagged pointer. That
-  // presented as a runtime bus error at an odd address (BUS_ADRALN), nowhere
-  // near the emission.
-  assembler.LoadUniqueObject(CODE_REG, cell);
-  assembler.LoadCompressed(
-      CODE_REG,
-      compiler::FieldAddress(
-          CODE_REG,
-          compiler::target::Array::element_offset(
-              MaotRegistry::kCellImplCode)));
-  // CODE_REG is left holding the implementation Code across the branch,
-  // which is what a callee expecting its own Code will find there.
-  assembler.ldr(TMP, compiler::FieldAddress(
-                         CODE_REG,
-                         compiler::target::Code::entry_point_offset()));
-  assembler.br(TMP);
+    // Branch through the cell's CODE half, never its Function half. Going via
+    // cell[kCellImplFunction]'s entry point would return here: this
+    // trampoline IS that Function's CurrentCode in release state, so the load
+    // would be a self-cycle.
+    //
+    // CODE_REG is the scratch AND the destination on purpose. TMP must not
+    // hold a value across a macro-assembler call -- LoadUniqueObject and
+    // LoadCompressed use TMP as their own scratch.
+    assembler.LoadUniqueObject(CODE_REG, cell);
+    assembler.LoadCompressed(
+        CODE_REG,
+        compiler::FieldAddress(
+            CODE_REG, compiler::target::Array::element_offset(
+                          MaotRegistry::kCellImplCode)));
+    assembler.ldr(TMP, compiler::FieldAddress(
+                           CODE_REG,
+                           compiler::target::Code::entry_point_offset()));
+    assembler.br(TMP);
 
-  const auto& code = Code::Handle(
-      Z, Code::FinalizeCode(nullptr, &assembler,
-                               Code::PoolAttachment::kNotAttachPool,
-                               /*optimized=*/false, /*stats=*/nullptr));
-  // DoSingleTargetMissAOT recovers the declaration with
-  // Function::RawCast(old_target_code.owner()), so an owner that is not this
-  // declaration silently breaks single-target range extension.
-  code.set_owner(owner);
-  // ...but a Function owner also makes Code::IsFunctionCode() true, and
+    code = Code::FinalizeCode(nullptr, &assembler,
+                              Code::PoolAttachment::kNotAttachPool,
+                              /*optimized=*/false, /*stats=*/nullptr);
+    if (!local_pool.TryCommitToParent()) {
+      // The global pool grew underneath us; this trampoline's encoded offsets
+      // are stale. Discard and retry, as normal compilation does.
+      code = Code::null();
+      continue;
+    }
+    break;
+  }
+  if (code.IsNull()) return Code::null();
+
+  if (FLAG_maot_trampoline_class_owner) {
+    // DIAGNOSTIC ONLY. Refuted as a factor: a Class owner crashed identically.
+    code.set_owner(Class::Handle(Z, owner.Owner()));
+  } else {
+    // DoSingleTargetMissAOT recovers the declaration with
+    // Function::RawCast(old_target_code.owner()).
+    code.set_owner(owner);
+  }
+  // A Function owner also makes Code::IsFunctionCode() true, and
   // ReplaceFunctionStaticCallEntries walks static_calls_target_table() for
   // exactly those. Allocation stubs escape that pass because their owner is a
-  // Class; this one cannot, so it needs a real (empty) table. Without it the
-  // fixer reads a null Array and gen_snapshot dies with a bus error at an odd
-  // address, inside a pass that has nothing to do with Mutable-AOT.
+  // Class; this one cannot.
   code.set_static_calls_target_table(Object::empty_array());
-  // A Code with a Function owner is serialized as FUNCTION code, and that
-  // cluster expects these to exist. FinalizeCode(nullptr, ...) leaves them
-  // unset because it is the stub path, and stubs are owned by a Class and
-  // serialized elsewhere. Without them the serializer walks a null and dies
-  // with a segfault at an odd address.
   code.set_pc_descriptors(Object::empty_descriptors());
   code.set_compressed_stackmaps(Object::empty_compressed_stackmaps());
   return code.ptr();
@@ -2028,7 +2027,6 @@ CodePtr Precompiler::GenerateMaotTrampoline(const Array& cell,
   return Code::null();
 #endif
 }
-
 
 void Precompiler::RepinMutableAotImplementations() {
   const intptr_t entries = MaotRegistry::Length(T);
