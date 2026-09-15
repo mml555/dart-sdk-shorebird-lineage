@@ -2290,6 +2290,9 @@ Fragment StreamingFlowGraphBuilder::BuildDynamicGet(TokenPosition* p) {
   }
 
   if (!direct_call_target->IsNull()) {
+    // The dynamic-invocation forwarder is what gets called; the TARGET
+    // whose identity matters is the function TFA proved.
+    NoteMaotDevirtualization(direct_call.target_);
     ASSERT(CompilerState::Current().is_aot());
     instructions +=
         StaticCall(position, *direct_call_target, 1, Array::null_array(),
@@ -2471,6 +2474,9 @@ Fragment StreamingFlowGraphBuilder::BuildDynamicSet(TokenPosition* p) {
   }
 
   if (!direct_call_target->IsNull()) {
+    // The dynamic-invocation forwarder is what gets called; the TARGET
+    // whose identity matters is the function TFA proved.
+    NoteMaotDevirtualization(direct_call.target_);
     ASSERT(CompilerState::Current().is_aot());
     instructions +=
         StaticCall(position, *direct_call_target, 2, Array::null_array(),
@@ -2999,6 +3005,9 @@ Fragment StreamingFlowGraphBuilder::BuildMethodInvocation(TokenPosition* p,
   }
 
   if (!direct_call_target->IsNull()) {
+    // The dynamic-invocation forwarder is what gets called; the TARGET
+    // whose identity matters is the function TFA proved.
+    NoteMaotDevirtualization(direct_call.target_);
     // Even if TFA infers a concrete receiver type, the static type of the
     // call-site may still be dynamic and we need to call the dynamic invocation
     // forwarder to ensure type-checks are performed.
