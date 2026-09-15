@@ -1817,6 +1817,26 @@ void Precompiler::DumpMaotTrampolineShapes() {
     fn = MaotRegistry::CurrentImplAt(T, i);
     ShapePrint("[maot-shape] --- entry %" Pd " ---\n", i);
     DumpMaotCodeShape("trampoline", tramp);
+    // Raw instruction words. The PM asked for instruction identity; raw
+    // words are decodable by hand and need no Disassembler API, so the
+    // emitted load offsets can be read directly rather than inferred from
+    // what the assembler was asked to emit.
+    {
+      const uword start = tramp.PayloadStart();
+      const intptr_t size = tramp.Size();
+      ShapePrint("[maot-insn] size=%" Pd " words:", size);
+      for (intptr_t off = 0; off + 4 <= size; off += 4) {
+        ShapePrint(" %08x", *reinterpret_cast<uint32_t*>(start + off));
+      }
+      ShapePrint("\n[maot-insn] entry_off=%" Pd " mono_off=%" Pd
+                 " cell=%p cellcode=%p\n",
+                 tramp.EntryPoint() - start,
+                 tramp.MonomorphicEntryPoint() - start,
+                 static_cast<void*>(
+                     MaotRegistry::DispatchCellAt(T, i).untag()),
+                 static_cast<void*>(body.IsNull() ? nullptr
+                                                  : body.untag()));
+    }
     DumpMaotCodeShape("body (known-good fn)", body);
     // The coupling the ruling flagged: two Code objects naming the same
     // declaration Function as owner, while that Function points at the
