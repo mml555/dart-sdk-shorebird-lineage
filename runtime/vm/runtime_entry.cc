@@ -3,6 +3,7 @@
 // BSD-style license that can be found in the LICENSE file.
 
 #include "vm/runtime_entry.h"
+#include "vm/maot_registry.h"
 
 #include <memory>
 
@@ -3312,6 +3313,45 @@ void PatchableCallHandler::ResolveSwitchAndReturn(const Object& old_data) {
 
 #if defined(DART_PRECOMPILED_RUNTIME)
 
+#if defined(DART_PRECOMPILED_RUNTIME)
+// MAOT-5 (#69). Record which AOT switchable-call state a mutable declaration
+// was resolved into, and whether the executable target that state stores is
+// that declaration's trampoline.
+//
+// The convergence question is exactly: does the cached target reach the cell?
+// Every AOT transition resolves through Function::CurrentCode(), and for a
+// selected declaration that IS the trampoline -- so comparing the stored code
+// against the registry's trampoline answers it without inferring one state
+// from another.
+static void MaotNoteSwitchableState(Thread* thread,
+                                    const Function& target,
+                                    const char* state) {
+  if (target.IsNull()) return;
+  if (!MaotRegistry::IsMutableDeclaration(thread, target)) return;
+  Zone* zone = thread->zone();
+  const intptr_t entry = MaotRegistry::IndexOf(
+      thread, String::Handle(zone, MaotRegistry::DeclarationIdOf(thread,
+                                                                target)));
+  if (entry < 0) return;
+  const auto& tramp =
+      Code::Handle(zone, MaotRegistry::TrampolineAt(thread, entry));
+  const bool converges =
+      !tramp.IsNull() && target.HasCode() &&
+      target.CurrentCode() == tramp.ptr();
+  MaotRegistry::NoteDecision(
+      thread, String::Handle(zone, MaotRegistry::DeclarationIdOf(thread,
+                                                                target)),
+      String::Handle(zone, String::New("<runtime-dispatch>", Heap::kOld)),
+      state,
+      converges ? "the executable target this state stores is the "
+                  "declaration trampoline, which loads the mutable cell"
+                : "the executable target this state stores is NOT the "
+                  "declaration trampoline",
+      converges ? MaotRegistry::kSlotPreserving
+                : MaotRegistry::kUnmodeledBlocking);
+}
+#endif
+
 void PatchableCallHandler::HandleMissAOT(const Object& old_data,
                                          uword old_entry,
                                          const Function& target_function) {
@@ -3319,26 +3359,39 @@ void PatchableCallHandler::HandleMissAOT(const Object& old_data,
     case kUnlinkedCallCid:
       ASSERT(old_entry ==
              StubCode::SwitchableCallMiss().MonomorphicEntryPoint());
+      MaotNoteSwitchableState(thread_, target_function,
+                              "instance-dispatch/UnlinkedCall-observed");
       DoUnlinkedCallAOT(UnlinkedCall::Cast(old_data), target_function);
       break;
     case kMonomorphicSmiableCallCid:
       ASSERT(old_entry ==
              StubCode::MonomorphicSmiableCheck().MonomorphicEntryPoint());
+      MaotNoteSwitchableState(
+          thread_, target_function,
+          "instance-dispatch/MonomorphicSmiableCall-observed");
       FALL_THROUGH;
     case kSmiCid:
+      MaotNoteSwitchableState(thread_, target_function,
+                              "instance-dispatch/monomorphic-observed");
       DoMonomorphicMissAOT(old_data, target_function);
       break;
     case kSingleTargetCacheCid:
       ASSERT(old_entry == StubCode::SingleTargetCall().MonomorphicEntryPoint());
+      MaotNoteSwitchableState(thread_, target_function,
+                              "instance-dispatch/SingleTargetCache-observed");
       DoSingleTargetMissAOT(SingleTargetCache::Cast(old_data), target_function);
       break;
     case kICDataCid:
       ASSERT(old_entry ==
              StubCode::ICCallThroughCode().MonomorphicEntryPoint());
+      MaotNoteSwitchableState(thread_, target_function,
+                              "instance-dispatch/ICData-observed");
       DoICDataMissAOT(ICData::Cast(old_data), target_function);
       break;
     case kMegamorphicCacheCid:
       ASSERT(old_entry == StubCode::MegamorphicCall().MonomorphicEntryPoint());
+      MaotNoteSwitchableState(thread_, target_function,
+                              "instance-dispatch/MegamorphicCache-observed");
       DoMegamorphicMiss(MegamorphicCache::Cast(old_data), target_function);
       break;
     default:
