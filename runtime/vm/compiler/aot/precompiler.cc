@@ -2,6 +2,8 @@
 // for details. All rights reserved. Use of this source code is governed by a
 // BSD-style license that can be found in the LICENSE file.
 
+#include <cstdarg>
+
 #include "vm/compiler/aot/precompiler.h"
 
 #include <cstring>
@@ -1758,6 +1760,85 @@ void Precompiler::SeedMutableAotRoots() {
 // include compiler headers ("AOT runtime should not use compiler sources").
 // The trampoline needs an Assembler, so it is precompiler-only by
 // construction.
+// Written to a FILE, not stderr: the process segfaults moments later and
+// anything still buffered is lost, which is indistinguishable from "the dump
+// never ran". A diagnostic that disappears exactly when it is needed is not a
+// diagnostic.
+static FILE* g_maot_shape_out = nullptr;
+
+static void ShapePrint(const char* fmt, ...) {
+  if (g_maot_shape_out == nullptr) return;
+  va_list args;
+  va_start(args, fmt);
+  vfprintf(g_maot_shape_out, fmt, args);
+  va_end(args);
+  fflush(g_maot_shape_out);
+}
+
+static void DumpMaotCodeShape(const char* label, const Code& code) {
+  if (code.IsNull()) {
+    ShapePrint("[maot-shape] %-22s <null>\n", label);
+    return;
+  }
+  const Object& owner = Object::Handle(code.owner());
+  const char* owner_kind = owner.IsNull()       ? "null"
+                           : owner.IsFunction() ? "Function"
+                           : owner.IsClass()    ? "Class"
+                                                : "other";
+  ShapePrint(
+      "[maot-shape] %-22s owner=%-8s isFnCode=%d pool=%d sct=%d pcdesc=%d "
+      "stackmaps=%d handlers=%d discarded=%d size=%" Pd " mono=%d\n",
+      label, owner_kind, code.IsFunctionCode() ? 1 : 0,
+      code.object_pool() != ObjectPool::null() ? 1 : 0,
+      code.static_calls_target_table() != Array::null() ? 1 : 0,
+      code.pc_descriptors() != PcDescriptors::null() ? 1 : 0,
+      code.compressed_stackmaps() != CompressedStackMaps::null() ? 1 : 0,
+      code.exception_handlers() != ExceptionHandlers::null() ? 1 : 0,
+      Code::IsDiscarded(code.ptr()) ? 1 : 0, code.Size(),
+      code.HasMonomorphicEntry() ? 1 : 0);
+}
+
+void Precompiler::DumpMaotTrampolineShapes() {
+  // Step 1 of the authorized sequence: compare, do not guess. Each trampoline
+  // is dumped beside the known-good Function-owned AOT Code it routes to and a
+  // known-good stub, so a malformed trampoline is distinguishable from a
+  // same-owner or multiplicity problem.
+  g_maot_shape_out = fopen("/tmp/maot_shape.txt", "w");
+  const intptr_t entries = MaotRegistry::Length(T);
+  ShapePrint("[maot-shape] BEGIN entries=%" Pd "\n", entries);
+  auto& tramp = Code::Handle(Z);
+  auto& body = Code::Handle(Z);
+  auto& fn = Function::Handle(Z);
+  intptr_t shown = 0;
+  for (intptr_t i = 0; i < entries && shown < 3; i++) {
+    tramp = MaotRegistry::TrampolineAt(T, i);
+    if (tramp.IsNull()) continue;
+    body = MaotRegistry::CellImplCodeAt(T, i);
+    fn = MaotRegistry::CurrentImplAt(T, i);
+    ShapePrint("[maot-shape] --- entry %" Pd " ---\n", i);
+    DumpMaotCodeShape("trampoline", tramp);
+    DumpMaotCodeShape("body (known-good fn)", body);
+    // The coupling the ruling flagged: two Code objects naming the same
+    // declaration Function as owner, while that Function points at the
+    // trampoline. Full-AOT Function serialization records a Code index.
+    ShapePrint(
+        "[maot-shape] same_owner=%d fn_code_is_trampoline=%d "
+        "fn_code_is_body=%d\n",
+        (!body.IsNull() && body.owner() == tramp.owner()) ? 1 : 0,
+        (!fn.IsNull() && fn.HasCode() && fn.CurrentCode() == tramp.ptr()) ? 1
+                                                                         : 0,
+        (!fn.IsNull() && fn.HasCode() && fn.CurrentCode() == body.ptr()) ? 1
+                                                                        : 0);
+    shown++;
+  }
+  DumpMaotCodeShape("stub (known-good)", StubCode::MegamorphicCall());
+  ShapePrint("[maot-shape] END shown=%" Pd "\n", shown);
+  if (g_maot_shape_out != nullptr) {
+    fclose(g_maot_shape_out);
+    g_maot_shape_out = nullptr;
+  }
+}
+
 void Precompiler::InstallMaotTrampolines() {
   // ORDERING, and it is the whole design. This runs AFTER
   // MaterializeMutableAotRegistry (so every cell exists and holds the body
@@ -1803,6 +1884,9 @@ void Precompiler::InstallMaotTrampolines() {
   if (FLAG_maot_trace_registration) {
     OS::PrintErr("[maot] installed %" Pd " dispatch trampolines (%" Pd
                  " skipped)\n", installed, skipped);
+  }
+  if (FLAG_maot_dump_trampoline_shape) {
+    DumpMaotTrampolineShapes();
   }
 }
 
