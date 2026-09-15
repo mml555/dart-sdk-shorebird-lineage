@@ -1061,7 +1061,20 @@ class CallSiteInliner : public ValueObject {
     // #68 generalises this into the real optimizer contract.
     if (CompilerState::Current().is_aot() &&
         MaotRegistry::IsMutableDeclaration(Thread::Current(), callee)) {
-      return InliningDecision::No("mutable-aot declaration");
+      // --maot_allow_inlining_mutable is the FALSIFICATION CONTROL for this
+      // rule. With it set, the rule is removed here and at seeding, the
+      // inliner's ordinary heuristics get to take the callee, and the
+      // resulting defect -- a caller holding a copy that no dispatch cell
+      // mediates -- is produced for real instead of argued about.
+      if (!FLAG_maot_allow_inlining_mutable) {
+        // Count the refusal. Without it, "inlining is prevented" is a claim
+        // about a callee the inliner may never have reached, and the
+        // falsification that removes the protection has no precondition to
+        // stand on.
+        MaotRegistry::NoteInlineVerdict(Thread::Current(), callee,
+                                        /*admitted=*/false);
+        return InliningDecision::No("mutable-aot declaration");
+      }
     }
     // Pragma or size heuristics.
     if (inliner_->AlwaysInline(callee)) {
@@ -1188,6 +1201,14 @@ class CallSiteInliner : public ValueObject {
     }
     const bool success = TryInliningImpl(function, argument_names, call_data,
                                          stricter_heuristic);
+    // Recorded HERE rather than at the heuristic, because this is the point
+    // at which a copy of the callee's body actually exists in the caller.
+    // A heuristic that said yes and then failed to splice is not an escape.
+    if (success && CompilerState::Current().is_aot() &&
+        MaotRegistry::IsMutableDeclaration(Thread::Current(), function)) {
+      MaotRegistry::NoteInlineVerdict(Thread::Current(), function,
+                                      /*admitted=*/true);
+    }
     if (thread()->compiler_timings() != nullptr) {
       timer.Stop();
       thread()->compiler_timings()->RecordInliningStatsByOutcome(success,

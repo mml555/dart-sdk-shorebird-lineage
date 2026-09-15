@@ -5,6 +5,7 @@
 #include "vm/compiler/aot/precompiler.h"
 
 #include <cstring>
+#include "vm/compiler/method_recognizer.h"
 #include "vm/maot_registry.h"
 
 #include <memory>
@@ -1619,8 +1620,10 @@ void Precompiler::SeedMutableAotRoots() {
         possibly_retained_functions_.ContainsKey(fn);
     const bool already_seen = seen_functions_.ContainsKey(fn);
     const bool had_code_before = fn.HasCode();
-    AddFunction(fn, RetainReasons::kMutableAotDeclaration);
-    AddTypesOf(fn);  // retains the owning class and its type graph
+    if (!FLAG_maot_disable_retention_roots) {
+      AddFunction(fn, RetainReasons::kMutableAotDeclaration);
+      AddTypesOf(fn);  // retains the owning class and its type graph
+    }
     if (FLAG_maot_trace_registration) {
       OS::PrintErr("[maot] seed %s possibly_retained_before=%d seen_before=%d "
                    "hascode_before=%d queued=%d\n", id.ToCString(),
@@ -1639,6 +1642,47 @@ void Precompiler::SeedMutableAotRoots() {
         T, String::Handle(Z, MaotRegistry::DeclarationIdOf(T, fn)),
         "no Mutable-AOT call lowering for this target architecture");
 #endif
+
+    // MAOT-4 (#68). A RECOGNIZED or INTRINSIFIED declaration can have its
+    // body replaced by the compiler with inline code at the call site, and
+    // that is not an instance-dispatch problem: dart:core's `identical` and
+    // a number of top-level Developer and FFI functions are recognized and
+    // STATIC, so the instance-member blocker cannot cover this class.
+    //
+    // Two things are true and only one of them is a proof:
+    //   * an SDK declaration can never be selected -- collectSelected and
+    //     index skip dart: libraries, and nothing in the SDK carries the
+    //     pragma. The m4 gate asserts the selected set contains no dart: id.
+    //   * a USER declaration can carry @pragma('vm:recognized'), and nothing
+    //     stopped it from also being mutable. That is the hole, and this
+    //     closes it.
+    // RECOGNIZED_LIST assigns recognized_kind only for SDK libraries, so the
+    // VM cannot reach this state for user code by itself. That is a reason to
+    // prove the blocker works by injecting the state, not a reason to ship a
+    // blocker nobody has watched fire.
+    const bool forced_recognized =
+        FLAG_maot_force_recognized && !fn.IsRecognized();
+    if (forced_recognized) {
+      fn.set_recognized_kind(MethodRecognizer::kObjectEquals);
+    }
+    if (fn.IsRecognized() || fn.is_intrinsic()) {
+      MaotRegistry::NoteDecision(
+          T, String::Handle(Z, MaotRegistry::DeclarationIdOf(T, fn)),
+          String::Handle(Z, MaotRegistry::AnyDeclarationIdOf(T, fn)),
+          "recognized-or-intrinsic",
+          "a recognized or intrinsified declaration can be replaced with "
+          "inline code at the call site, which no dispatch cell mediates",
+          MaotRegistry::kForbidden);
+    }
+    if (forced_recognized) {
+      // Restored deliberately. The injection exists to exercise the blocker's
+      // predicate; leaving the kind set makes the compiler emit the
+      // recognized method's own graph in place of this body, which segfaults
+      // gen_snapshot. That crash is itself a fact worth recording -- the VM
+      // does not support this state for user code, which is why the tables
+      // never produce it.
+      fn.set_recognized_kind(MethodRecognizer::kUnknown);
+    }
 
     // MAOT-4 (#68). A selected INSTANCE member can be reached by dispatch
     // forms this issue does not model -- virtual, interface, super, dynamic,
@@ -1686,11 +1730,16 @@ void Precompiler::SeedMutableAotRoots() {
     }
 
     // MAOT-3 (#67), conservative posture: a selected declaration may not be
-    // inlined. An inlined copy is a caller that never reaches the dispatch
+    // inlined. --maot_allow_inlining_mutable is a FALSIFICATION CONTROL: it
+    // lets the inliner take a mutable callee so the resulting defect -- a
+    // caller holding a copy that no installation can reach -- can be produced
+    // and caught rather than argued about. An inlined copy is a caller that never reaches the dispatch
     // cell, so installation would be invisible to it -- the exact defect the
     // falsification arms have to catch. #68 generalises this into the real
     // optimizer contract; here it is a blunt, recorded rule.
-    fn.set_is_inlinable(false);
+    if (!FLAG_maot_allow_inlining_mutable) {
+      fn.set_is_inlinable(false);
+    }
     seeded++;
   }
   if (FLAG_maot_trace_registration) {
@@ -1725,6 +1774,8 @@ void Precompiler::MaterializeMutableAotRegistry() {
   GrowableArray<const String*> keep_call_convs;
   GrowableArray<const Array*> keep_cells;
   GrowableArray<intptr_t> keep_call_sites;
+  GrowableArray<intptr_t> keep_inline_refusals;
+  GrowableArray<intptr_t> keep_inline_admissions;
   GrowableArray<intptr_t> keep_escapes;
   GrowableArray<const String*> keep_escape_reasons;
   GrowableArray<bool> keep_selected;
@@ -1781,6 +1832,13 @@ void Precompiler::MaterializeMutableAotRegistry() {
     // after it. Re-registering without it reported zero emitted call sites
     // for declarations that had eleven.
     keep_call_sites.Add(MaotRegistry::CallSiteCountFor(T, fn));
+    // Same reason, same failure mode: the inliner ran before this rebuild.
+    {
+      intptr_t refusals = 0, admissions = 0;
+      MaotRegistry::InlineCountsFor(T, fn, &refusals, &admissions);
+      keep_inline_refusals.Add(refusals);
+      keep_inline_admissions.Add(admissions);
+    }
     // Escape accounting is compiler-path evidence too, and it is CONSUMED by
     // the install decision -- losing it here would silently re-open every
     // declaration the optimizer had disqualified.
@@ -1808,6 +1866,8 @@ void Precompiler::MaterializeMutableAotRegistry() {
                                           *keep_call_convs[i], *keep_cells[i],
                                           *keep_ids[i]);
     MaotRegistry::SetCallSiteCountFor(T, *keep_ids[i], keep_call_sites[i]);
+    MaotRegistry::SetInlineCountsFor(T, *keep_ids[i], keep_inline_refusals[i],
+                                     keep_inline_admissions[i]);
     MaotRegistry::SetEscapeStateFor(T, *keep_ids[i], keep_escapes[i],
                                     *keep_escape_reasons[i]);
     ASSERT(ok);

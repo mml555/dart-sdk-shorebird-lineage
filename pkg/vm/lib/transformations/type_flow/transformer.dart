@@ -81,6 +81,41 @@ bool _isMaotMutable(Member member) {
 }
 
 
+/// MEASUREMENT ONLY (#68 performance accounting), read once from the
+/// environment. An environment variable rather than a VM flag because this
+/// code runs inside gen_kernel, which does not take VM flags.
+final bool _maotSelectAllNonSdk =
+    Platform.environment['MAOT_SELECT_ALL_NON_SDK'] == '1';
+
+/// Restricts the scale lane to libraries whose import URI starts with this,
+/// so the realistic posture -- an app author marking their OWN declarations
+/// mutable -- can be measured next to the upper bound of marking everything.
+/// Empty means no restriction.
+final String _maotSelectUriPrefix =
+    Platform.environment['MAOT_SELECT_URI_PREFIX'] ?? '';
+
+/// The scale lane's selection predicate: the same population the pragma path
+/// can reach, minus what the registry would skip anyway. An abstract or
+/// external member has no AOT body to replace, so counting it would inflate
+/// the measurement with declarations the posture never touches.
+bool _isMaotSelectableAtScale(Member member) {
+  if (_maotSelectUriPrefix.isNotEmpty &&
+      !member.enclosingLibrary.importUri
+          .toString()
+          .startsWith(_maotSelectUriPrefix)) {
+    return false;
+  }
+  if (member is Procedure) {
+    return !member.isAbstract &&
+        !member.isExternal &&
+        member.function.body != null;
+  }
+  if (member is Constructor) {
+    return !member.isExternal;
+  }
+  return false;
+}
+
 Component transformComponent(
   Target target,
   CoreTypes coreTypes,
@@ -191,10 +226,17 @@ Component transformComponent(
   // stay representable. Selection is therefore decided here, on the unshaken
   // component, and carried per declaration.
   final maotIdentity = MaotIdentity();
+  // MEASUREMENT ONLY (#68 performance accounting). The m4 fixture is eight
+  // declarations, which cannot say what the conservative posture costs a real
+  // program. MAOT_SELECT_ALL_NON_SDK=1 selects every non-SDK member instead,
+  // giving the UPPER BOUND for a representative Flutter application: every
+  // app and framework declaration mutable at once. It is not a policy and
+  // nothing installs under it -- the gate records which runs used it, and the
+  // scale lane is reported separately from the correctness lanes.
   final maotSelectedIds = MaotDeclarationIdMetadataRepository.collectSelected(
     component,
     maotIdentity,
-    _isMaotMutable,
+    _maotSelectAllNonSdk ? _isMaotSelectableAtScale : _isMaotMutable,
   );
 
   final (:fieldMorpher, treeShakeConstant: treeShakeConstant) = new TreeShaker(

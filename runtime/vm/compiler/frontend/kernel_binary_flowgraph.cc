@@ -3437,7 +3437,8 @@ Fragment StreamingFlowGraphBuilder::BuildStaticInvocation(TokenPosition* p) {
   // The front end suppresses the constant; this is the VM refusing to trust
   // that it did. Recording the decision makes StageReplacement refuse, so the
   // defect becomes an install refusal instead of a descriptor that lies.
-  if (FLAG_precompiled_mode && !target.IsNull() && result_type.IsConstant() &&
+  if (FLAG_precompiled_mode && !FLAG_maot_disable_constant_backstop &&
+      !target.IsNull() && result_type.IsConstant() &&
       MaotRegistry::IsMutableDeclaration(thread(), target)) {
     MaotRegistry::NoteDecision(
         thread(),
