@@ -1971,10 +1971,45 @@ void Precompiler::InstallMaotTrampolines() {
   }
 }
 
+// The cell's index in the global ObjectPool that has ALREADY been
+// materialized, or -1.
+//
+// #67's call-site lowering does LoadUniqueObject(cell) while the global pool
+// builder is still live, so every declaration that had a call site emitted
+// already has its cell in the finished pool. The trampoline therefore does
+// not need to register the object again -- it only needs to name the entry
+// that exists.
+//
+// It must not register it again, and that is the whole point: by the time
+// trampolines are generated the builder has been Reset() and the real pool
+// is sealed, so anything added lands in a builder nobody reads while the
+// emitted instruction indexes the sealed pool at the wrong slot.
+intptr_t Precompiler::FindCellInGlobalPool(const Array& cell) {
+  const auto& pool =
+      ObjectPool::Handle(Z, IG->object_store()->global_object_pool());
+  if (pool.IsNull() || cell.IsNull()) return -1;
+  for (intptr_t i = 0; i < pool.Length(); i++) {
+    if (pool.TypeAt(i) != ObjectPool::EntryType::kTaggedObject) continue;
+    if (pool.ObjectAt(i) == cell.ptr()) return i;
+  }
+  return -1;
+}
+
 CodePtr Precompiler::GenerateMaotTrampoline(const Array& cell,
                                             const Function& owner) {
 #if defined(TARGET_ARCH_ARM64) && defined(DART_PRECOMPILER)
   if (cell.IsNull() || owner.IsNull()) return Code::null();
+  const intptr_t cell_pool_index = FindCellInGlobalPool(cell);
+  if (cell_pool_index < 0) {
+    // No call site referenced this cell, so it is not in the sealed pool and
+    // the trampoline has no legal way to name it. Refusing is correct: a
+    // trampoline that cannot reach its own cell is worse than none.
+    if (FLAG_maot_trace_registration) {
+      OS::PrintErr("[maot] no pool entry for the cell of %s; no trampoline\n",
+                   owner.ToCString());
+    }
+    return Code::null();
+  }
 
   // Use the intermediary-pool mechanism the way normal compilation uses it.
   //
@@ -2015,7 +2050,12 @@ CodePtr Precompiler::GenerateMaotTrampoline(const Array& cell,
     // CODE_REG is the scratch AND the destination on purpose. TMP must not
     // hold a value across a macro-assembler call -- LoadUniqueObject and
     // LoadCompressed use TMP as their own scratch.
-    assembler.LoadUniqueObject(CODE_REG, cell);
+    // Name the EXISTING pool entry; do not add one. See
+    // FindCellInGlobalPool. LoadUniqueObject here would append to a builder
+    // that has already been Reset() and whose contents nothing reads, while
+    // the emitted instruction would index the sealed pool at slot ~1 -- an
+    // unrelated object, read as a Code, branched to as garbage.
+    assembler.LoadWordFromPoolIndex(CODE_REG, cell_pool_index);
     assembler.LoadCompressed(
         CODE_REG,
         compiler::FieldAddress(
