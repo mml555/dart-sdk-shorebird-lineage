@@ -1838,11 +1838,19 @@ CodePtr Precompiler::GenerateMaotTrampoline(const Array& cell,
   // cell[kCellImplFunction]'s entry point would return here: this trampoline
   // IS that Function's CurrentCode in release state, so the load would be a
   // self-cycle and every mutable call would recurse forever.
-  assembler.LoadUniqueObject(TMP, cell);
+  // CODE_REG is the scratch AND the destination, on purpose. TMP must not be
+  // used to hold anything across a macro-assembler call: LoadUniqueObject and
+  // LoadCompressed use TMP as their own scratch, so a value parked there is
+  // silently clobbered and the final branch jumps to a tagged pointer. That
+  // presented as a runtime bus error at an odd address (BUS_ADRALN), nowhere
+  // near the emission.
+  assembler.LoadUniqueObject(CODE_REG, cell);
   assembler.LoadCompressed(
       CODE_REG,
       compiler::FieldAddress(
-          TMP, compiler::target::Array::element_offset(MaotRegistry::kCellImplCode)));
+          CODE_REG,
+          compiler::target::Array::element_offset(
+              MaotRegistry::kCellImplCode)));
   // CODE_REG is left holding the implementation Code across the branch,
   // which is what a callee expecting its own Code will find there.
   assembler.ldr(TMP, compiler::FieldAddress(
