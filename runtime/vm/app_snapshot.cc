@@ -6,6 +6,8 @@
 #include <utility>
 
 #include "vm/app_snapshot.h"
+#include <cstdarg>
+#include "vm/maot_registry.h"
 
 #include "platform/assert.h"
 #include "vm/bootstrap.h"
@@ -2626,6 +2628,26 @@ class KernelProgramInfoDeserializationCluster : public DeserializationCluster {
   }
 };
 
+// MAOT-5 (#69) diagnostic. File-backed and flushed per line: stderr is lost
+// when the process dies mid-write, which already made one diagnostic
+// indistinguishable from never having run. The point is to know the LAST
+// successful and FIRST failing serializer operation, not to compare shapes.
+static FILE* g_maot_ser_trace = nullptr;
+static intptr_t g_maot_ser_ordinal = 0;
+
+static void MaotSerTrace(const char* fmt, ...) {
+  if (!FLAG_maot_trace_serializer) return;
+  if (g_maot_ser_trace == nullptr) {
+    g_maot_ser_trace = fopen("/tmp/maot_ser_trace.txt", "w");
+    if (g_maot_ser_trace == nullptr) return;
+  }
+  va_list args;
+  va_start(args, fmt);
+  vfprintf(g_maot_ser_trace, fmt, args);
+  va_end(args);
+  fflush(g_maot_ser_trace);
+}
+
 class CodeSerializationCluster : public SerializationCluster {
  public:
   explicit CodeSerializationCluster(Heap* heap)
@@ -2907,8 +2929,22 @@ class CodeSerializationCluster : public SerializationCluster {
       s->UnexpectedObject(code, "Disabled code");
     }
 
+    const bool maot_tramp =
+        FLAG_maot_trace_serializer &&
+        MaotRegistry::IsTrampolineCode(Thread::Current(), code);
+    const intptr_t maot_ord = g_maot_ser_ordinal++;
+    MaotSerTrace("BEGIN_CODE %" Pd " code=%p maot=%d owner_cid=%" Pd
+                 " pool=%d deferred=%d\n",
+                 maot_ord, static_cast<void*>(code->untag()),
+                 maot_tramp ? 1 : 0,
+                 static_cast<intptr_t>(code->untag()->owner_->GetClassId()),
+                 code->untag()->object_pool_ != ObjectPool::null() ? 1 : 0,
+                 deferred ? 1 : 0);
+
+    MaotSerTrace("  WRITE_instructions %" Pd "\n", maot_ord);
     s->WriteInstructions(code->untag()->instructions_,
                          code->untag()->unchecked_offset_, code, deferred);
+    MaotSerTrace("  DONE_instructions %" Pd "\n", maot_ord);
     if (kind == Snapshot::kFullJIT) {
       // TODO(rmacnak): Fix references to disabled code before serializing.
       // For now, we may write the FixCallersTarget or equivalent stub. This
@@ -2970,10 +3006,18 @@ class CodeSerializationCluster : public SerializationCluster {
         WriteFieldValue(object_pool_, ObjectPool::null());
       }
     }
+    MaotSerTrace("  WRITE_owner %" Pd "\n", maot_ord);
     WriteField(code, owner_);
+    MaotSerTrace("  DONE_owner %" Pd "\n", maot_ord);
+    MaotSerTrace("  WRITE_exception_handlers %" Pd "\n", maot_ord);
     WriteField(code, exception_handlers_);
+    MaotSerTrace("  DONE_exception_handlers %" Pd "\n", maot_ord);
+    MaotSerTrace("  WRITE_pc_descriptors %" Pd "\n", maot_ord);
     WriteField(code, pc_descriptors_);
+    MaotSerTrace("  DONE_pc_descriptors %" Pd "\n", maot_ord);
+    MaotSerTrace("  WRITE_catch_entry %" Pd "\n", maot_ord);
     WriteField(code, catch_entry_);
+    MaotSerTrace("  DONE_catch_entry %" Pd "\n", maot_ord);
     if (s->kind() == Snapshot::kFullJIT) {
       WriteField(code, compressed_stackmaps_);
     }
@@ -2981,12 +3025,16 @@ class CodeSerializationCluster : public SerializationCluster {
       WriteFieldValue(inlined_id_to_function_, Array::null());
       WriteFieldValue(code_source_map_, CodeSourceMap::null());
     } else {
+      MaotSerTrace("  WRITE_inlined_id_to_function %" Pd "\n", maot_ord);
       WriteField(code, inlined_id_to_function_);
+      MaotSerTrace("  DONE_inlined_id_to_function %" Pd "\n", maot_ord);
+      MaotSerTrace("  WRITE_code_source_map %" Pd "\n", maot_ord);
       if (s->InCurrentLoadingUnitOrRoot(code->untag()->code_source_map_)) {
         WriteField(code, code_source_map_);
       } else {
         WriteFieldValue(code_source_map_, CodeSourceMap::null());
       }
+      MaotSerTrace("  DONE_code_source_map %" Pd "\n", maot_ord);
     }
     if (kind == Snapshot::kFullJIT) {
       WriteField(code, deopt_info_array_);
@@ -2999,6 +3047,7 @@ class CodeSerializationCluster : public SerializationCluster {
       WriteField(code, comments_);
     }
 #endif
+    MaotSerTrace("END_CODE %" Pd "\n", maot_ord);
   }
 
   GrowableArray<CodePtr>* objects() { return &objects_; }

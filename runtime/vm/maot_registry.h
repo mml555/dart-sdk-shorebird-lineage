@@ -65,6 +65,9 @@ DECLARE_FLAG(bool, maot_disable_escape_detection);
 DECLARE_FLAG(bool, maot_ignore_escapes_on_install);
 DECLARE_FLAG(bool, maot_drop_escape_state_at_materialization);
 DECLARE_FLAG(charp, maot_inject_disposition);
+DECLARE_FLAG(bool, maot_trace_serializer);
+DECLARE_FLAG(charp, maot_trampoline_only);
+DECLARE_FLAG(charp, maot_trampoline_skip);
 DECLARE_FLAG(bool, maot_dump_trampoline_shape);
 DECLARE_FLAG(int, maot_limit_selected);
 DECLARE_FLAG(bool, maot_trampoline_class_owner);
@@ -302,6 +305,8 @@ class MaotRegistry : public AllStatic {
   static FunctionPtr CurrentImplAt(Thread* thread, intptr_t entry);
   static ArrayPtr DispatchCellAt(Thread* thread, intptr_t entry);
   static CodePtr CellImplCodeAt(Thread* thread, intptr_t entry);
+  static StringPtr DeclarationIdAt(Thread* thread, intptr_t entry);
+  static bool IsTrampolineCode(Thread* thread, ObjectPtr code);
   static void SetTrampolineFor(Thread* thread,
                                intptr_t entry,
                                const Code& trampoline);

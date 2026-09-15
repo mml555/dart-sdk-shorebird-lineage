@@ -1832,6 +1832,30 @@ void Precompiler::DumpMaotTrampolineShapes() {
     shown++;
   }
   DumpMaotCodeShape("stub (known-good)", StubCode::MegamorphicCall());
+  // The identity table the ruling asked for: one row per installed
+  // trampoline, so a later serializer trace line can be joined back to the
+  // declaration it belongs to by Code address.
+  ShapePrint("[maot-ident] ordinal declaration_id function code owner pool "
+             "instructions pc_desc stackmaps entry mono_entry\n");
+  auto& id = String::Handle(Z);
+  intptr_t ord = 0;
+  for (intptr_t i = 0; i < entries; i++) {
+    tramp = MaotRegistry::TrampolineAt(T, i);
+    if (tramp.IsNull()) continue;
+    fn = MaotRegistry::CurrentImplAt(T, i);
+    id = MaotRegistry::DeclarationIdAt(T, i);
+    ShapePrint("[maot-ident] %" Pd " %s fn=%p code=%p owner=%p pool=%p "
+               "instr=%p pcdesc=%p maps=%p entry=%" Px " mono=%" Px "\n",
+               ord++, id.IsNull() ? "<null>" : id.ToCString(),
+               static_cast<void*>(fn.untag()),
+               static_cast<void*>(tramp.untag()),
+               static_cast<void*>(tramp.owner().untag()),
+               static_cast<void*>(tramp.object_pool().untag()),
+               static_cast<void*>(tramp.instructions().untag()),
+               static_cast<void*>(tramp.pc_descriptors().untag()),
+               static_cast<void*>(tramp.compressed_stackmaps().untag()),
+               tramp.EntryPoint(), tramp.MonomorphicEntryPoint());
+  }
   ShapePrint("[maot-shape] END shown=%" Pd "\n", shown);
   if (g_maot_shape_out != nullptr) {
     fclose(g_maot_shape_out);
@@ -1878,6 +1902,24 @@ void Precompiler::InstallMaotTrampolines() {
     if (FLAG_maot_limit_selected >= 0 && installed >= FLAG_maot_limit_selected) {
       skipped++;
       continue;
+    }
+    // Controls 3 and 4: isolate one declaration, or move a declaration off a
+    // particular ordinal while holding the trampoline count fixed. Together
+    // they separate "declaration-specific" from "count/order-specific".
+    if (FLAG_maot_trampoline_only != nullptr ||
+        FLAG_maot_trampoline_skip != nullptr) {
+      const auto& decl = String::Handle(Z, MaotRegistry::DeclarationIdAt(T, i));
+      const char* decl_c = decl.IsNull() ? "" : decl.ToCString();
+      if (FLAG_maot_trampoline_only != nullptr &&
+          strstr(decl_c, FLAG_maot_trampoline_only) == nullptr) {
+        skipped++;
+        continue;
+      }
+      if (FLAG_maot_trampoline_skip != nullptr &&
+          strstr(decl_c, FLAG_maot_trampoline_skip) != nullptr) {
+        skipped++;
+        continue;
+      }
     }
     tramp ^= GenerateMaotTrampoline(cell, fn);
     if (tramp.IsNull()) {
