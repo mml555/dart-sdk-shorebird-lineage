@@ -174,6 +174,14 @@ class MaotRegistry : public AllStatic {
   // name, address or any other reconstruction: it is the same object the
   // metadata named. Only meaningful inside the precompiler, where that binding
   // is still in the table.
+  // Element indices into the dispatch cell. Named rather than written as
+  // bare 0/1 at each site: the compiler emits a field offset computed from
+  // these, and an off-by-one there is a branch to whatever object happens to
+  // sit in the next slot.
+  static constexpr intptr_t kCellImplFunction = 0;
+  static constexpr intptr_t kCellImplCode = 1;
+  static constexpr intptr_t kCellLength = 2;
+
   static ArrayPtr DispatchCellForFunction(Thread* thread,
                                           const Function& function);
 
@@ -417,7 +425,22 @@ class MaotRegistry : public AllStatic {
     // A call site references this object directly, from the object pool,
     // established while the Kernel binding was authoritative -- it is never
     // re-found.
-    kDispatchCell,        // Array(1) holding the current implementation
+    // MAOT-5 (#69). Array(2): [0] the implementation Function, [1] the
+    // pinned executable Code for it.
+    //
+    // The Function alone is not the executable implementation -- #66 proved
+    // that and pins the Code for exactly this reason. #69 needs the second
+    // half in the CELL rather than only in the descriptor, because the
+    // trampoline that instance dispatch resolves through must branch to a
+    // CODE. Branching through cell[0]'s Function entry point would re-enter
+    // the trampoline itself: the declaration Function's own CurrentCode IS
+    // the trampoline, so the load returns to where it came from and every
+    // mutable call recurses forever.
+    //
+    // Both halves advance together on installation. Neither is authoritative
+    // alone: the Function half carries the VM calling convention, the Code
+    // half is what actually executes.
+    kDispatchCell,        // Array(2): [impl Function, impl Code]
     // The release implementation, captured once and never overwritten, so a
     // replaced declaration can still say what it shipped as. #71 owns real
     // version history; this is the one entry that history will need.
