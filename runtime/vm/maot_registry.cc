@@ -74,6 +74,46 @@ DEFINE_FLAG(charp,
             "measured rather than argued from the enum.");
 
 DEFINE_FLAG(bool,
+            maot_disable_retention_roots,
+            false,
+            "FALSIFICATION CONTROL. Seed everything EXCEPT the retention "
+            "root: bind, register and lower call sites as usual, but do not "
+            "ask the precompiler to keep the declaration. Unlike "
+            "--maot_disable_seeding, which turns the whole mechanism off and "
+            "aborts the program, this isolates retention -- reachable "
+            "declarations survive because their callers retain them, and only "
+            "a declaration the release never calls disappears.");
+
+DEFINE_FLAG(bool,
+            maot_disable_constant_backstop,
+            false,
+            "FALSIFICATION CONTROL. Stop the VM from refusing a constant "
+            "result inferred for a mutable call. Paired with "
+            "MAOT_ALLOW_CONSTANT_FOLDING=1 in the front end it removes BOTH "
+            "layers, so the raw defect appears: installation succeeds and "
+            "every caller keeps the folded release answer.");
+
+DEFINE_FLAG(bool,
+            maot_force_recognized,
+            false,
+            "FALSIFICATION CONTROL. Mark selected declarations recognized "
+            "for the duration of the blocker's check at seeding, then restore "
+            "kUnknown. RECOGNIZED_LIST only names SDK libraries, so the VM "
+            "cannot produce this state for user code on its own -- and a "
+            "blocker whose precondition is unreachable is a blocker nobody "
+            "has ever seen fire. The kind is restored because LEAVING it set "
+            "makes the compiler emit that recognized method's graph for an "
+            "unrelated body, which segfaults gen_snapshot -- itself evidence "
+            "that this state is not one the VM supports for user code.");
+
+DEFINE_FLAG(bool,
+            maot_allow_inlining_mutable,
+            false,
+            "FALSIFICATION CONTROL. Let the inliner take a mutable callee. "
+            "The caller then holds a copy no installation can reach, which is "
+            "the defect the conservative posture exists to prevent.");
+
+DEFINE_FLAG(bool,
             maot_materialize_unselected,
             false,
             "FALSIFICATION CONTROL. Let unselected declarations into the "
@@ -287,6 +327,8 @@ bool MaotRegistry::Register(Thread* thread,
   storage.Add(Object::null_object(), Heap::kOld);            // staged impl id
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // escape count
   storage.Add(Object::null_object(), Heap::kOld);            // escape reason
+  storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // inline refusals
+  storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // inline admits
   storage.Add(Smi::Handle(zone, Smi::New(-1)), Heap::kOld);  // staged kind
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // staged version
   storage.Add(Object::null_object(), Heap::kOld);            // staged impl
@@ -693,6 +735,70 @@ void MaotRegistry::NoteCallSiteEmitted(Thread* thread,
                Smi::Handle(zone, Smi::New(n + 1)));
     return;
   }
+}
+
+void MaotRegistry::NoteInlineVerdict(Thread* thread,
+                                     const Function& callee,
+                                     bool admitted) {
+  if (callee.IsNull()) return;
+  Zone* zone = thread->zone();
+  const intptr_t entries = Length(thread);
+  auto& candidate = Function::Handle(zone);
+  for (intptr_t i = 0; i < entries; i++) {
+    candidate ^= FieldAt(thread, i, kCurrentImpl);
+    if (candidate.ptr() != callee.ptr()) continue;
+    const EntryField f = admitted ? kInlineAdmissionCount : kInlineRefusalCount;
+    const intptr_t n = Smi::Value(Smi::RawCast(FieldAt(thread, i, f)));
+    SetFieldAt(thread, i, f, Smi::Handle(zone, Smi::New(n + 1)));
+    if (admitted) {
+      // An admitted inline is not just a number. The caller now holds a copy
+      // of this body that no dispatch cell mediates, so installing a
+      // replacement would leave that caller executing release code. Record
+      // the escape so StageReplacement refuses, rather than letting the
+      // build ship a descriptor that claims to be installable.
+      NoteEscapeById(
+          thread,
+          String::Handle(zone,
+                         String::RawCast(FieldAt(thread, i, kDeclarationId))),
+          "the inliner took this declaration as a callee, so a caller holds a "
+          "copy that no dispatch cell mediates");
+    }
+    return;
+  }
+}
+
+void MaotRegistry::InlineCountsFor(Thread* thread,
+                                   const Function& function,
+                                   intptr_t* refusals,
+                                   intptr_t* admissions) {
+  *refusals = 0;
+  *admissions = 0;
+  if (function.IsNull()) return;
+  Zone* zone = thread->zone();
+  const intptr_t entries = Length(thread);
+  auto& candidate = Function::Handle(zone);
+  for (intptr_t i = 0; i < entries; i++) {
+    candidate ^= FieldAt(thread, i, kCurrentImpl);
+    if (candidate.ptr() != function.ptr()) continue;
+    *refusals = Smi::Value(Smi::RawCast(FieldAt(thread, i,
+                                                kInlineRefusalCount)));
+    *admissions = Smi::Value(Smi::RawCast(FieldAt(thread, i,
+                                                  kInlineAdmissionCount)));
+    return;
+  }
+}
+
+void MaotRegistry::SetInlineCountsFor(Thread* thread,
+                                      const String& declaration_id,
+                                      intptr_t refusals,
+                                      intptr_t admissions) {
+  const intptr_t entry = IndexOf(thread, declaration_id);
+  if (entry < 0) return;
+  Zone* zone = thread->zone();
+  SetFieldAt(thread, entry, kInlineRefusalCount,
+             Smi::Handle(zone, Smi::New(refusals)));
+  SetFieldAt(thread, entry, kInlineAdmissionCount,
+             Smi::Handle(zone, Smi::New(admissions)));
 }
 
 intptr_t MaotRegistry::CallSiteCountFor(Thread* thread,
@@ -1596,6 +1702,16 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
     writer.PrintProperty64(
         "indirect_call_sites_emitted",
         Smi::Value(Smi::RawCast(FieldAt(thread, i, kCallSiteCount))));
+    // MAOT-4 performance accounting AND the precondition for the injected
+    // inlining falsification. Refusals > 0 says the inliner actually
+    // considered this callee; admissions > 0 can only happen under
+    // --maot_allow_inlining_mutable and always carries an escape with it.
+    writer.PrintProperty64(
+        "inline_refusals",
+        Smi::Value(Smi::RawCast(FieldAt(thread, i, kInlineRefusalCount))));
+    writer.PrintProperty64(
+        "inline_admissions",
+        Smi::Value(Smi::RawCast(FieldAt(thread, i, kInlineAdmissionCount))));
     {
       const auto& release_fn = Function::Handle(zone,
           Function::RawCast(FieldAt(thread, i, kReleaseImpl)));

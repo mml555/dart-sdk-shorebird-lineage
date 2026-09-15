@@ -63,6 +63,10 @@ DECLARE_FLAG(bool, maot_disable_escape_detection);
 DECLARE_FLAG(bool, maot_ignore_escapes_on_install);
 DECLARE_FLAG(bool, maot_drop_escape_state_at_materialization);
 DECLARE_FLAG(charp, maot_inject_disposition);
+DECLARE_FLAG(bool, maot_disable_retention_roots);
+DECLARE_FLAG(bool, maot_disable_constant_backstop);
+DECLARE_FLAG(bool, maot_force_recognized);
+DECLARE_FLAG(bool, maot_allow_inlining_mutable);
 DECLARE_FLAG(charp, maot_namespace);
 DECLARE_FLAG(bool, maot_trace_registration);
 DECLARE_FLAG(bool, maot_disable_seeding);
@@ -256,6 +260,25 @@ class MaotRegistry : public AllStatic {
 
   // Records that one more indirect call site was emitted for `function`.
   static void NoteCallSiteEmitted(Thread* thread, const Function& function);
+  // Records an inliner verdict for a mutable callee. `admitted` false means
+  // the MAOT rule refused it; true means the falsification control let it
+  // through, which additionally records an escape so installation fails
+  // closed rather than silently producing a stale caller.
+  static void NoteInlineVerdict(Thread* thread,
+                                const Function& callee,
+                                bool admitted);
+  static void InlineCountsFor(Thread* thread,
+                              const Function& function,
+                              intptr_t* refusals,
+                              intptr_t* admissions);
+  // Restores counts across the materialization rebuild. The inliner runs
+  // during compilation; the final table is rebuilt afterwards, so a count
+  // that is not carried is a count that reports zero for a declaration the
+  // inliner refused eleven times -- the same defect the call-site count hit.
+  static void SetInlineCountsFor(Thread* thread,
+                                 const String& declaration_id,
+                                 intptr_t refusals,
+                                 intptr_t admissions);
 
   // Compiler-path evidence, gathered during code generation and therefore
   // carried across the rebuild of the table at materialization.
@@ -421,6 +444,20 @@ class MaotRegistry : public AllStatic {
     // log -- which is the difference between evidence and decoration.
     kEscapeCount,         // Smi
     kEscapeReason,        // String or null
+    // MAOT-4 (#68). How many times the AOT inliner considered this
+    // declaration as a callee and REFUSED it, and how many times it took it.
+    //
+    // Two consumers, in opposite directions:
+    //   * refusals > 0 is the precondition for the injected-inlining
+    //     falsification. Without it, "inlining was prevented" is a claim
+    //     about a callee no inliner ever looked at -- an arm that cannot run
+    //     is not an arm that passed.
+    //   * admissions must be 0 in any shipped build. A non-zero admission
+    //     means a caller holds a copy that no dispatch cell mediates, so it
+    //     is recorded as an ESCAPE too and StageReplacement fails closed on
+    //     it. The counter is the measurement; the escape is the enforcement.
+    kInlineRefusalCount,  // Smi
+    kInlineAdmissionCount,  // Smi
     kStagedKind,          // Smi, or -1 when nothing staged
     kStagedVersion,       // Smi
     kStagedImpl,          // Function or null
