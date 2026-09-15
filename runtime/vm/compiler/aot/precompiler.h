@@ -329,6 +329,8 @@ class Precompiler : public ValueObject {
   // has settled.
   void SeedMutableAotRoots();
   void MaterializeMutableAotRegistry();
+  CodePtr GenerateMaotTrampoline(const Array& cell, const Function& owner);
+  void InstallMaotTrampolines();
   void RepinMutableAotImplementations();
   void AddInstantiatedClass(const Class& cls);
   void AddSelector(const String& selector);

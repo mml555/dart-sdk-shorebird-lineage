@@ -50,6 +50,8 @@
 // out of DART_PRECOMPILED_RUNTIME entirely, so it cannot be recovered from the
 // Function at run time. It is captured at materialization and stored as data.
 
+#include <functional>
+
 #include "vm/allocation.h"
 #include "vm/flags.h"
 #include "vm/object.h"
@@ -283,6 +285,30 @@ class MaotRegistry : public AllStatic {
   // during compilation; the final table is rebuilt afterwards, so a count
   // that is not carried is a count that reports zero for a declaration the
   // inliner refused eleven times -- the same defect the call-site count hit.
+  // MAOT-5 (#69). Hands every pinned Code in the registry to `canonicalize`
+  // and stores what comes back. Called from ProgramVisitor::Dedup, which is
+  // where the dispatch table is canonicalized for the same reason.
+  //
+  // The registry is the ONLY holder of a mutable declaration's body Code once
+  // its Function carries the trampoline, so a pin left pre-dedup keeps two
+  // Code objects with identical Instructions reachable and the serializer
+  // refuses that outright. Re-deriving the body from the Function is not an
+  // option after Stage 2: CurrentCode() is the trampoline by then, and
+  // re-deriving would point the cell's Code half at the trampoline, which
+  // then branches to itself.
+  static FunctionPtr CurrentImplAt(Thread* thread, intptr_t entry);
+  static ArrayPtr DispatchCellAt(Thread* thread, intptr_t entry);
+  static CodePtr CellImplCodeAt(Thread* thread, intptr_t entry);
+  static void SetTrampolineFor(Thread* thread,
+                               intptr_t entry,
+                               const Code& trampoline);
+  static CodePtr TrampolineAt(Thread* thread, intptr_t entry);
+
+  static void CanonicalizeCodePins(
+      Thread* thread,
+      Zone* zone,
+      const std::function<CodePtr(const Code&)>& canonicalize);
+
   static void SetInlineCountsFor(Thread* thread,
                                  const String& declaration_id,
                                  intptr_t refusals,
@@ -481,6 +507,17 @@ class MaotRegistry : public AllStatic {
     //     it. The counter is the measurement; the escape is the enforcement.
     kInlineRefusalCount,  // Smi
     kInlineAdmissionCount,  // Smi
+    // MAOT-5 (#69). The trampoline installed as this declaration Function's
+    // CurrentCode, so instance dispatch -- which resolves through
+    // Function::CurrentCode() for the dispatch table and every switchable
+    // call state -- reaches the cell instead of a frozen body address.
+    //
+    // Recorded because its presence CHANGES WHAT REPINNING MEANS. While it is
+    // null, a descriptor's pinned Code is whatever the Function points at.
+    // Once it is set, the Function points at the trampoline and the body is
+    // reachable only from the registry's own pins, which are canonicalized in
+    // ProgramVisitor::Dedup rather than rederived here.
+    kTrampolineCode,      // Code, or null
     kStagedKind,          // Smi, or -1 when nothing staged
     kStagedVersion,       // Smi
     kStagedImpl,          // Function or null

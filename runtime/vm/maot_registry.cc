@@ -341,6 +341,7 @@ bool MaotRegistry::Register(Thread* thread,
   storage.Add(Object::null_object(), Heap::kOld);            // escape reason
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // inline refusals
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // inline admits
+  storage.Add(Object::null_object(), Heap::kOld);            // trampoline
   storage.Add(Smi::Handle(zone, Smi::New(-1)), Heap::kOld);  // staged kind
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // staged version
   storage.Add(Object::null_object(), Heap::kOld);            // staged impl
@@ -468,6 +469,17 @@ bool MaotRegistry::RepinCurrentCode(Thread* thread, intptr_t index) {
       {kCurrentCode, kCurrentImpl},
       {kReleaseCode, kReleaseImpl},
   };
+  // MAOT-5 (#69). Once the trampoline is installed, implFunction.CurrentCode()
+  // is the TRAMPOLINE, not the body. Rederiving a body pin from it would set
+  // the descriptor -- and, through the same expression, the cell's Code half
+  // -- to the trampoline, and the trampoline would branch to itself.
+  //
+  // The pins are canonicalized in ProgramVisitor::Dedup instead, where the
+  // dispatch table is canonicalized for exactly the same reason. There is
+  // nothing left for this function to do for such an entry.
+  if (TrampolineAt(thread, index) != Code::null()) {
+    return false;
+  }
   for (const auto& pin : kPinned) {
     const auto& fn = Function::Handle(
         zone, Function::RawCast(FieldAt(thread, index, pin.impl)));
@@ -818,6 +830,69 @@ void MaotRegistry::InlineCountsFor(Thread* thread,
     *admissions = Smi::Value(Smi::RawCast(FieldAt(thread, i,
                                                   kInlineAdmissionCount)));
     return;
+  }
+}
+
+FunctionPtr MaotRegistry::CurrentImplAt(Thread* thread, intptr_t entry) {
+  const ObjectPtr raw = FieldAt(thread, entry, kCurrentImpl);
+  return raw == Object::null() ? Function::null() : Function::RawCast(raw);
+}
+
+ArrayPtr MaotRegistry::DispatchCellAt(Thread* thread, intptr_t entry) {
+  const ObjectPtr raw = FieldAt(thread, entry, kDispatchCell);
+  return raw == Object::null() ? Array::null() : Array::RawCast(raw);
+}
+
+CodePtr MaotRegistry::CellImplCodeAt(Thread* thread, intptr_t entry) {
+  const ArrayPtr cell = DispatchCellAt(thread, entry);
+  if (cell == Array::null()) return Code::null();
+  const ObjectPtr raw = Array::Handle(thread->zone(), cell).At(kCellImplCode);
+  return raw == Object::null() ? Code::null() : Code::RawCast(raw);
+}
+
+void MaotRegistry::SetTrampolineFor(Thread* thread,
+                                    intptr_t entry,
+                                    const Code& trampoline) {
+  SetFieldAt(thread, entry, kTrampolineCode, trampoline);
+}
+
+CodePtr MaotRegistry::TrampolineAt(Thread* thread, intptr_t entry) {
+  const ObjectPtr raw = FieldAt(thread, entry, kTrampolineCode);
+  return raw == Object::null() ? Code::null() : Code::RawCast(raw);
+}
+
+void MaotRegistry::CanonicalizeCodePins(
+    Thread* thread,
+    Zone* zone,
+    const std::function<CodePtr(const Code&)>& canonicalize) {
+  const intptr_t entries = Length(thread);
+  auto& code = Code::Handle(zone);
+  auto& canonical = Code::Handle(zone);
+  // Every Code the registry pins. kCurrentCode and kReleaseCode are the
+  // descriptor's pins; the cell's Code half is what the #69 trampoline
+  // actually branches through, so leaving it non-canonical would route
+  // dispatch at a Code object the snapshot no longer contains.
+  const EntryField kPins[] = {kCurrentCode, kReleaseCode, kTrampolineCode};
+  for (intptr_t i = 0; i < entries; i++) {
+    for (const auto field : kPins) {
+      const auto& raw = Object::Handle(zone, FieldAt(thread, i, field));
+      if (raw.IsNull() || !raw.IsCode()) continue;
+      code ^= raw.ptr();
+      canonical ^= canonicalize(code);
+      if (canonical.ptr() != code.ptr()) {
+        SetFieldAt(thread, i, field, canonical);
+      }
+    }
+    const auto& cell =
+        Array::Handle(zone, Array::RawCast(FieldAt(thread, i, kDispatchCell)));
+    if (cell.IsNull()) continue;
+    const auto& raw = Object::Handle(zone, cell.At(kCellImplCode));
+    if (raw.IsNull() || !raw.IsCode()) continue;
+    code ^= raw.ptr();
+    canonical ^= canonicalize(code);
+    if (canonical.ptr() != code.ptr()) {
+      cell.SetAt(kCellImplCode, canonical);
+    }
   }
 }
 
