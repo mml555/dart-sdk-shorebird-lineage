@@ -1362,9 +1362,24 @@ void ProgramVisitor::DedupInstructions(Thread* thread) {
       // Code half to the trampoline and the trampoline would branch to
       // itself. The body must be canonicalized as an independent pin, never
       // rediscovered through the declaration Function.
+      // LOOKUP ONLY, never Canonicalize(). Canonicalize() falls through to
+      // Dedup(), which INSERTS when the object is not already known -- and
+      // the body Code of a mutable declaration is reachable only from the
+      // registry once its Function carries the trampoline, so it is never
+      // in the walk. Inserting grew canonical_objects_ and tripped the
+      // RELEASE_ASSERT below, which exists to catch exactly that.
+      //
+      // A pin whose Code is absent from the map was never merged with
+      // anything, so it is already canonical and must be left alone.
       MaotRegistry::CanonicalizeCodePins(
           Thread::Current(), zone_, [&](const Code& c) -> CodePtr {
-            return should_canonicalize(c) ? Canonicalize(c) : c.ptr();
+            if (!should_canonicalize(c)) return c.ptr();
+            auto const canonical = canonical_objects_.LookupValue(&c);
+            if (canonical == nullptr) return c.ptr();
+            if (!c.is_discarded() && canonical->is_discarded()) {
+              canonical->set_is_discarded(false);
+            }
+            return canonical->ptr();
           });
 
       // If there's a global object pool, add any visitable objects.
