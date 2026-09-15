@@ -1077,6 +1077,14 @@ void MaotRegistry::RunSelfTest(Thread* thread, const char* path) {
   JSONWriter w;
   w.OpenObject();
   w.PrintProperty("schema", "maot.registry.selftest/1");
+  // Says which question this run answers: production semantics, or the #66
+  // ABI regression probe with the optimizer-installability guard deliberately
+  // bypassed so ABI compatibility is the first refusal again.
+  w.PrintProperty("mode", FLAG_maot_ignore_escapes_on_install
+                              ? "abi-regression-probe"
+                              : "production");
+  w.PrintPropertyBool("escape_consumption_bypassed",
+                      FLAG_maot_ignore_escapes_on_install);
 
   const auto& ns = String::Handle(zone, GetNamespace(thread));
   w.PrintProperty("namespace_identity",
@@ -1117,7 +1125,14 @@ void MaotRegistry::RunSelfTest(Thread* thread, const char* path) {
   // optimizer escape. Staging SEMANTICS cannot be measured on an entry that
   // refuses for that reason -- the arm would be reading the escape rule and
   // reporting it as a staging failure. The pair must be installable.
+  //
+  // Under --maot_ignore_escapes_on_install this restriction lifts: that is the
+  // #66 ABI regression probe, whose whole purpose is to ask what the real
+  // StageReplacement path decides when the optimizer guard is not the FIRST
+  // refusal. Keeping the restriction there would make the probe unable to
+  // reach the entries it exists to test.
   auto installable = [&](intptr_t i) {
+    if (FLAG_maot_ignore_escapes_on_install) return true;
     return Smi::Value(Smi::RawCast(FieldAt(thread, i, kEscapeCount))) == 0;
   };
 
