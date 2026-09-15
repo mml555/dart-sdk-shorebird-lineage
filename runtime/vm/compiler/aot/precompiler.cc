@@ -1872,6 +1872,13 @@ void Precompiler::InstallMaotTrampolines() {
       skipped++;
       continue;
     }
+    // Step 2 of the authorized sequence: a one-trampoline build separates a
+    // malformed trampoline from a problem that only appears with several
+    // sharing the registry, the global pool, or one declaration Function.
+    if (FLAG_maot_limit_selected >= 0 && installed >= FLAG_maot_limit_selected) {
+      skipped++;
+      continue;
+    }
     tramp ^= GenerateMaotTrampoline(cell, fn);
     if (tramp.IsNull()) {
       skipped++;
