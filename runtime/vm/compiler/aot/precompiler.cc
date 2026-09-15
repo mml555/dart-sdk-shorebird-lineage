@@ -1866,6 +1866,13 @@ CodePtr Precompiler::GenerateMaotTrampoline(const Array& cell,
   // Function::RawCast(old_target_code.owner()), so an owner that is not this
   // declaration silently breaks single-target range extension.
   code.set_owner(owner);
+  // ...but a Function owner also makes Code::IsFunctionCode() true, and
+  // ReplaceFunctionStaticCallEntries walks static_calls_target_table() for
+  // exactly those. Allocation stubs escape that pass because their owner is a
+  // Class; this one cannot, so it needs a real (empty) table. Without it the
+  // fixer reads a null Array and gen_snapshot dies with a bus error at an odd
+  // address, inside a pass that has nothing to do with Mutable-AOT.
+  code.set_static_calls_target_table(Object::empty_array());
   return code.ptr();
 #else
   return Code::null();
