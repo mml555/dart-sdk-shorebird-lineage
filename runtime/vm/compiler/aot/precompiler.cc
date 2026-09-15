@@ -1827,6 +1827,11 @@ CodePtr Precompiler::GenerateMaotTrampoline(const Array& cell,
   // monomorphic state, and in AOT that predicate is
   // entry_point_ != monomorphic_entry_point_ -- which only this prologue
   // produces.
+  // A fresh Assembler starts with the constant pool disallowed, so
+  // LoadUniqueObject fails CanLoadFromObjectPool. In AOT the global pool is
+  // live in its own register for the whole program, so it is allowed here.
+  assembler.set_constant_pool_allowed(true);
+
   assembler.MonomorphicCheckedEntryAOT();
 
   // Branch through the cell's CODE half, never its Function half. Going via
