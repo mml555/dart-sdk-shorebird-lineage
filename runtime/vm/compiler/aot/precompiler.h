@@ -331,6 +331,7 @@ class Precompiler : public ValueObject {
   void MaterializeMutableAotRegistry();
   CodePtr GenerateMaotTrampoline(const Array& cell, const Function& owner);
   void InstallMaotTrampolines();
+  void DumpMaotTrampolineShapes();
   void RepinMutableAotImplementations();
   void AddInstantiatedClass(const Class& cls);
   void AddSelector(const String& selector);
