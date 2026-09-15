@@ -398,6 +398,7 @@ bool MaotRegistry::Register(Thread* thread,
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // inline refusals
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // inline admits
   storage.Add(Object::null_object(), Heap::kOld);            // trampoline
+  storage.Add(Smi::Handle(zone, Smi::New(-1)), Heap::kOld);  // cell pool index
   storage.Add(Smi::Handle(zone, Smi::New(-1)), Heap::kOld);  // staged kind
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // staged version
   storage.Add(Object::null_object(), Heap::kOld);            // staged impl
@@ -918,6 +919,30 @@ bool MaotRegistry::IsTrampolineCode(Thread* thread, ObjectPtr code) {
     if (FieldAt(thread, i, kTrampolineCode) == code) return true;
   }
   return false;
+}
+
+intptr_t MaotRegistry::CellPoolIndexAt(Thread* thread, intptr_t entry) {
+  return Smi::Value(Smi::RawCast(FieldAt(thread, entry, kCellPoolIndex)));
+}
+
+void MaotRegistry::SetCellPoolIndexAt(Thread* thread,
+                                      intptr_t entry,
+                                      intptr_t index) {
+  SetFieldAt(thread, entry, kCellPoolIndex,
+             Smi::Handle(thread->zone(), Smi::New(index)));
+}
+
+intptr_t MaotRegistry::CellPoolIndexForFunction(Thread* thread,
+                                                const Function& function) {
+  if (function.IsNull()) return -1;
+  Zone* zone = thread->zone();
+  const intptr_t entries = Length(thread);
+  auto& candidate = Function::Handle(zone);
+  for (intptr_t i = 0; i < entries; i++) {
+    candidate ^= FieldAt(thread, i, kCurrentImpl);
+    if (candidate.ptr() == function.ptr()) return CellPoolIndexAt(thread, i);
+  }
+  return -1;
 }
 
 void MaotRegistry::SetTrampolineFor(Thread* thread,

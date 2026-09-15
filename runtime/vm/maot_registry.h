@@ -312,6 +312,13 @@ class MaotRegistry : public AllStatic {
                                intptr_t entry,
                                const Code& trampoline);
   static CodePtr TrampolineAt(Thread* thread, intptr_t entry);
+  static intptr_t CellPoolIndexAt(Thread* thread, intptr_t entry);
+  static void SetCellPoolIndexAt(Thread* thread,
+                                 intptr_t entry,
+                                 intptr_t index);
+  // The seeded pool index for a function's cell, or -1.
+  static intptr_t CellPoolIndexForFunction(Thread* thread,
+                                           const Function& function);
 
   static void CanonicalizeCodePins(
       Thread* thread,
@@ -527,6 +534,18 @@ class MaotRegistry : public AllStatic {
     // reachable only from the registry's own pins, which are canonicalized in
     // ProgramVisitor::Dedup rather than rederived here.
     kTrampolineCode,      // Code, or null
+    // MAOT-5 (#69). The ONE canonical global-object-pool index for this
+    // declaration's cell, seeded while the pool builder is still live.
+    //
+    // Pool membership is a property of BEING SELECTED, not a side effect of
+    // #67's static-call lowering having happened to run. A purely virtual
+    // declaration has no static call site, so nothing ever added its cell to
+    // the pool, so no trampoline could name it -- which is exactly why
+    // virtual routing had nothing to route through.
+    //
+    // Both consumers read this one index: #67's call-site lowering and #69's
+    // trampoline. There is deliberately no second registration path.
+    kCellPoolIndex,       // Smi, -1 when unseeded
     kStagedKind,          // Smi, or -1 when nothing staged
     kStagedVersion,       // Smi
     kStagedImpl,          // Function or null
