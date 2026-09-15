@@ -65,6 +65,7 @@ DECLARE_FLAG(bool, maot_disable_escape_detection);
 DECLARE_FLAG(bool, maot_ignore_escapes_on_install);
 DECLARE_FLAG(bool, maot_drop_escape_state_at_materialization);
 DECLARE_FLAG(charp, maot_inject_disposition);
+DECLARE_FLAG(bool, maot_install_trampolines);
 DECLARE_FLAG(bool, maot_trace_serializer);
 DECLARE_FLAG(charp, maot_trampoline_only);
 DECLARE_FLAG(charp, maot_trampoline_skip);

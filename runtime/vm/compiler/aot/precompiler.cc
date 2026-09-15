@@ -1884,6 +1884,9 @@ void Precompiler::DumpMaotTrampolineShapes() {
 }
 
 void Precompiler::InstallMaotTrampolines() {
+  // #69 is in progress and does not serialize above a small population. The
+  // accepted #66/#67/#68 behaviour must remain the default until it does.
+  if (!FLAG_maot_install_trampolines) return;
   // ORDERING, and it is the whole design. This runs AFTER
   // MaterializeMutableAotRegistry (so every cell exists and holds the body
   // Code) and BEFORE FinalizeDispatchTable (so the table captures the

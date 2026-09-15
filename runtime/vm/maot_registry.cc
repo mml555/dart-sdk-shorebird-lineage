@@ -74,6 +74,15 @@ DEFINE_FLAG(charp,
             "measured rather than argued from the enum.");
 
 DEFINE_FLAG(bool,
+            maot_install_trampolines,
+            false,
+            "MAOT-5 (#69), OFF by default. Install a dispatch trampoline as "
+            "each selected declaration's CurrentCode so instance dispatch "
+            "resolves through the mutable cell. Default off because the "
+            "mechanism does not yet serialize above a small population, and "
+            "#66/#67/#68 are accepted work that must keep passing meanwhile.");
+
+DEFINE_FLAG(bool,
             maot_trace_serializer,
             false,
             "DIAGNOSTIC. Bracket every Code serialization operation into a "
