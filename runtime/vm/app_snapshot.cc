@@ -2916,11 +2916,19 @@ class CodeSerializationCluster : public SerializationCluster {
                  Snapshot::Kind kind,
                  CodePtr code,
                  bool deferred) {
+    const intptr_t maot_ord0 = g_maot_ser_ordinal;
+    MaotSerTrace("ENTER_CODE %" Pd " code=%p\n", maot_ord0,
+                 static_cast<void*>(code->untag()));
     const intptr_t bytes_written = s->bytes_written();
-    AutoTraceObjectName(code, MakeDisambiguatedCodeName(s, code));
+    MaotSerTrace("  ok_bytes_written %" Pd "\n", maot_ord0);
+    const char* maot_name = MakeDisambiguatedCodeName(s, code);
+    MaotSerTrace("  ok_name %" Pd "\n", maot_ord0);
+    AutoTraceObjectName(code, maot_name);
+    MaotSerTrace("  ok_autotrace %" Pd "\n", maot_ord0);
 
     intptr_t pointer_offsets_length =
         Code::PtrOffBits::decode(code->untag()->state_bits_);
+    MaotSerTrace("  ok_ptroffbits %" Pd "\n", maot_ord0);
     if (pointer_offsets_length != 0) {
       FATAL("Cannot serialize code with embedded pointers");
     }
@@ -2928,6 +2936,7 @@ class CodeSerializationCluster : public SerializationCluster {
       // Disabled code is fatal in AOT since we cannot recompile.
       s->UnexpectedObject(code, "Disabled code");
     }
+    MaotSerTrace("  ok_isdisabled %" Pd "\n", maot_ord0);
 
     const bool maot_tramp =
         FLAG_maot_trace_serializer &&
