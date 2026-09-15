@@ -1898,6 +1898,18 @@ void Precompiler::InstallMaotTrampolines() {
   // canonicalized in the same pass for the same reason.
   const intptr_t entries = MaotRegistry::Length(T);
   intptr_t installed = 0, skipped = 0;
+  if (FLAG_maot_trace_registration || FLAG_maot_dump_trampoline_shape) {
+    // Is the global pool builder still live at this point, or has it already
+    // been materialized into the real ObjectPool and Reset()? A trampoline
+    // assembled against a reset builder encodes indices into a pool that no
+    // longer exists.
+    const auto& live_pool =
+        ObjectPool::Handle(Z, IG->object_store()->global_object_pool());
+    OS::PrintErr("[maot] at install: global_builder_len=%" Pd
+                 " materialized_pool_len=%" Pd "\n",
+                 global_object_pool_builder()->CurrentLength(),
+                 live_pool.IsNull() ? -1 : live_pool.Length());
+  }
   auto& fn = Function::Handle(Z);
   auto& cell = Array::Handle(Z);
   auto& body = Code::Handle(Z);
