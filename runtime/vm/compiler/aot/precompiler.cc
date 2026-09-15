@@ -2040,6 +2040,34 @@ void Precompiler::RepinMutableAotImplementations() {
     OS::PrintErr("[maot] re-pinned %" Pd " of %" Pd " descriptors after "
                  "dedup\n", repinned, entries);
   }
+  if (FLAG_maot_dump_trampoline_shape || FLAG_maot_trace_serializer) {
+    // POST-DEDUP distinctness. Checkpoint 1 argued that each trampoline
+    // reaches its own cell through a distinct pool index, so no two could
+    // share instruction bytes and Dedup would have nothing to merge. That was
+    // an argument, never a measurement. This measures it.
+    //
+    // If the count of DISTINCT trampoline Code objects is less than the
+    // number installed, Dedup merged them -- and a single trampoline shared
+    // by several declarations branches through ONE cell, which is
+    // semantically wrong however it serializes.
+    intptr_t installed = 0, distinct = 0;
+    auto& a = Code::Handle(Z);
+    auto& b = Code::Handle(Z);
+    for (intptr_t i = 0; i < entries; i++) {
+      a = MaotRegistry::TrampolineAt(T, i);
+      if (a.IsNull()) continue;
+      installed++;
+      bool seen = false;
+      for (intptr_t j = 0; j < i && !seen; j++) {
+        b = MaotRegistry::TrampolineAt(T, j);
+        if (!b.IsNull() && b.ptr() == a.ptr()) seen = true;
+      }
+      if (!seen) distinct++;
+    }
+    OS::PrintErr("[maot] POST-DEDUP trampolines: installed=%" Pd
+                 " distinct=%" Pd "%s\n", installed, distinct,
+                 distinct < installed ? "  <-- MERGED BY DEDUP" : "");
+  }
 }
 
 void Precompiler::MaterializeMutableAotRegistry() {
