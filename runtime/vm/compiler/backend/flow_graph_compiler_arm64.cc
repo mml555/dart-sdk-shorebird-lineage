@@ -408,7 +408,8 @@ void FlowGraphCompiler::GenerateStaticDartCall(intptr_t deopt_id,
   // not be able to bind permanently to the release implementation.
   //
   //     x0 <- the descriptor's dispatch cell        (object pool, compile time)
-  //     x0 <- [x0 + Array::element_offset(0)]       (current implementation)
+  //     x0 <- [x0 + Array::element_offset(kCellImplFunction)]
+  //                                                  (current implementation)
   //     blr [x0 + Function::entry_point_]
   //
   // The cell is part of the #66 descriptor and is written only by that class's
@@ -456,7 +457,8 @@ void FlowGraphCompiler::GenerateStaticDartCall(intptr_t deopt_id,
       __ LoadCompressed(
           FUNCTION_REG,
           compiler::FieldAddress(FUNCTION_REG,
-                                 compiler::target::Array::element_offset(0)));
+                                 compiler::target::Array::element_offset(
+                                     MaotRegistry::kCellImplFunction)));
       CLOBBERS_LR(__ Call(compiler::FieldAddress(
           FUNCTION_REG,
           compiler::target::Function::entry_point_offset(entry_kind))));

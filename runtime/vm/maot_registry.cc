@@ -300,13 +300,25 @@ bool MaotRegistry::Register(Thread* thread,
   // through materialization unchanged -- call sites emitted during
   // compilation reference THIS object, so replacing it later would strand
   // every one of them on a cell nobody updates.
-  if (dispatch_cell.IsNull()) {
-    const auto& fresh = Array::Handle(zone, Array::New(1, Heap::kOld));
-    fresh.SetAt(0, implementation);
-    storage.Add(fresh, Heap::kOld);
-  } else {
-    dispatch_cell.SetAt(0, implementation);
-    storage.Add(dispatch_cell, Heap::kOld);
+  {
+    // Both halves are written together, here and at installation, and
+    // nowhere else. A cell whose Function and Code disagree would dispatch
+    // to one declaration's body while reporting another's identity.
+    const auto& impl_code = Object::Handle(zone,
+        implementation.IsNull() || !implementation.HasCode()
+            ? Object::null()
+            : implementation.CurrentCode());
+    if (dispatch_cell.IsNull()) {
+      const auto& fresh =
+          Array::Handle(zone, Array::New(kCellLength, Heap::kOld));
+      fresh.SetAt(kCellImplFunction, implementation);
+      fresh.SetAt(kCellImplCode, impl_code);
+      storage.Add(fresh, Heap::kOld);
+    } else {
+      dispatch_cell.SetAt(kCellImplFunction, implementation);
+      dispatch_cell.SetAt(kCellImplCode, impl_code);
+      storage.Add(dispatch_cell, Heap::kOld);
+    }
   }
   storage.Add(implementation, Heap::kOld);                   // release impl
   storage.Add(implementation.IsNull() || !implementation.HasCode()
@@ -465,6 +477,27 @@ bool MaotRegistry::RepinCurrentCode(Thread* thread, intptr_t index) {
     if (before.ptr() == now.ptr()) continue;
     SetFieldAt(thread, index, pin.code, now);
     changed = true;
+  }
+
+  // MAOT-5: the CELL's Code half is captured at registration too, so it is
+  // pre-dedup for exactly the same reason and fails in exactly the same way.
+  // #67 reintroduced this defect through kReleaseCode after #66 fixed it for
+  // kCurrentCode; adding a third pinned Code without re-pinning it would be
+  // the third instance of one mistake.
+  {
+    const auto& cell = Array::Handle(
+        zone, Array::RawCast(FieldAt(thread, index, kDispatchCell)));
+    if (!cell.IsNull()) {
+      const auto& fn = Function::Handle(
+          zone, Function::RawCast(cell.At(kCellImplFunction)));
+      const auto& before = Object::Handle(zone, cell.At(kCellImplCode));
+      const auto& now = Object::Handle(zone,
+          fn.IsNull() || !fn.HasCode() ? Object::null() : fn.CurrentCode());
+      if (before.ptr() != now.ptr()) {
+        cell.SetAt(kCellImplCode, now);
+        changed = true;
+      }
+    }
   }
   return changed;
 }
@@ -1054,7 +1087,18 @@ bool MaotRegistry::CommitStagedForTesting(Thread* thread,
       Array::Handle(zone, Array::RawCast(FieldAt(thread, entry,
                                                  kDispatchCell)));
   if (!cell.IsNull()) {
-    cell.SetAt(0, staged_impl);
+    // MAOT-5: both halves advance together. The Code half is what the #69
+    // trampoline branches through, so leaving it stale would let instance
+    // dispatch keep executing the release body while direct calls moved --
+    // which is the exact divergence #69 exists to close.
+    const auto& staged_fn_for_cell = Function::Handle(zone,
+        staged_impl.IsNull() ? Function::null()
+                             : Function::RawCast(staged_impl.ptr()));
+    cell.SetAt(kCellImplFunction, staged_impl);
+    cell.SetAt(kCellImplCode,
+               staged_fn_for_cell.IsNull() || !staged_fn_for_cell.HasCode()
+                   ? Object::null_object()
+                   : Object::Handle(zone, staged_fn_for_cell.CurrentCode()));
   }
   SetFieldAt(thread, entry, kCurrentAbi,
              Object::Handle(zone, FieldAt(thread, entry, kStagedAbi)));
@@ -1718,7 +1762,7 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
       const auto& cell = Array::Handle(zone,
           Array::RawCast(FieldAt(thread, i, kDispatchCell)));
       const auto& in_cell = Object::Handle(zone,
-          cell.IsNull() ? Object::null() : cell.At(0));
+          cell.IsNull() ? Object::null() : cell.At(kCellImplFunction));
       const auto& current_fn = Function::Handle(zone,
           Function::RawCast(FieldAt(thread, i, kCurrentImpl)));
       const auto& cur_id = String::Handle(zone,
@@ -1730,6 +1774,26 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
       // nothing decides on them.
       writer.PrintProperty("current_implementation_id",
                            cur_id.IsNull() ? "<absent>" : cur_id.ToCString());
+      // MAOT-5: both halves of the cell, and whether they agree. They are
+      // written together and must stay together; a cell whose Function and
+      // Code disagree would dispatch to one body while reporting another's
+      // identity, and that has to be readable rather than deduced.
+      {
+        const auto& cell_code = Object::Handle(zone,
+            cell.IsNull() ? Object::null() : cell.At(kCellImplCode));
+        const auto& in_cell_fn = Function::Handle(zone,
+            in_cell.IsNull() ? Function::null()
+                             : Function::RawCast(in_cell.ptr()));
+        const auto& expected = Object::Handle(zone,
+            in_cell_fn.IsNull() || !in_cell_fn.HasCode()
+                ? Object::null() : in_cell_fn.CurrentCode());
+        writer.PrintProperty64("dispatch_cell_length",
+                               cell.IsNull() ? -1 : cell.Length());
+        writer.PrintPropertyBool("dispatch_cell_has_code",
+                                 !cell_code.IsNull());
+        writer.PrintPropertyBool("dispatch_cell_halves_agree",
+                                 cell_code.ptr() == expected.ptr());
+      }
       writer.PrintPropertyBool(
           "current_implementation_is_the_declaration_itself",
           !cur_id.IsNull() && cur_id.Equals(id));
