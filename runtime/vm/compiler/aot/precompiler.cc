@@ -1873,6 +1873,13 @@ CodePtr Precompiler::GenerateMaotTrampoline(const Array& cell,
   // fixer reads a null Array and gen_snapshot dies with a bus error at an odd
   // address, inside a pass that has nothing to do with Mutable-AOT.
   code.set_static_calls_target_table(Object::empty_array());
+  // A Code with a Function owner is serialized as FUNCTION code, and that
+  // cluster expects these to exist. FinalizeCode(nullptr, ...) leaves them
+  // unset because it is the stub path, and stubs are owned by a Class and
+  // serialized elsewhere. Without them the serializer walks a null and dies
+  // with a segfault at an odd address.
+  code.set_pc_descriptors(Object::empty_descriptors());
+  code.set_compressed_stackmaps(Object::empty_compressed_stackmaps());
   return code.ptr();
 #else
   return Code::null();
