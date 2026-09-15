@@ -2063,6 +2063,73 @@ MAOT_TEST_EXPORT int64_t Dart_MaotInstallForTesting(const char* declaration_id,
                                          static_cast<intptr_t>(version), ns);
 }
 
+// ROUTING DIAGNOSTIC ONLY -- this is NOT installation.
+//
+// Writes both halves of a declaration's cell directly, bypassing
+// StageReplacement and every escape/disposition check it performs. It exists
+// to answer one question: does a real AOT instance call reach this
+// declaration's trampoline and therefore its cell?
+//
+// It deliberately does not weaken production policy. #68's instance-dispatch
+// escape still stands and normal installation is still refused; proving the
+// route is a precondition for revisiting that escape, not a substitute for
+// it. Nothing here advances a version, records an implementation id, or
+// makes any claim about ABI compatibility.
+MAOT_TEST_EXPORT int64_t Dart_MaotDiagnosticCellSwap(
+    const char* declaration_id,
+    const char* implementation_id) {
+  Thread* thread = Thread::Current();
+  if (thread == nullptr) return -10;
+  TransitionNativeToVM transition(thread);
+  StackZone stack_zone(thread);
+  HANDLESCOPE(thread);
+  Zone* zone = thread->zone();
+  const auto& id =
+      String::Handle(zone, String::New(declaration_id, Heap::kOld));
+  const auto& impl_id =
+      String::Handle(zone, String::New(implementation_id, Heap::kOld));
+  const intptr_t entry = MaotRegistry::IndexOf(thread, id);
+  if (entry < 0) return -1;
+  const intptr_t impl_entry = MaotRegistry::IndexOf(thread, impl_id);
+  if (impl_entry < 0) return -2;
+  const auto& cell = Array::Handle(
+      zone, MaotRegistry::DispatchCellAt(thread, entry));
+  if (cell.IsNull()) return -3;
+  const auto& impl_fn = Function::Handle(
+      zone, MaotRegistry::CurrentImplAt(thread, impl_entry));
+  if (impl_fn.IsNull() || !impl_fn.HasCode()) return -4;
+  cell.SetAt(MaotRegistry::kCellImplFunction, impl_fn);
+  cell.SetAt(MaotRegistry::kCellImplCode,
+             Code::Handle(zone, impl_fn.CurrentCode()));
+  return 0;
+}
+
+// Reports whether this declaration carries a trampoline, and whether the
+// dispatch-table entry frozen for it is that same trampoline. Identity, not
+// behaviour -- the behavioural half is the swap above.
+MAOT_TEST_EXPORT int64_t Dart_MaotTrampolineIdentityForTesting(
+    const char* declaration_id) {
+  Thread* thread = Thread::Current();
+  if (thread == nullptr) return -10;
+  TransitionNativeToVM transition(thread);
+  StackZone stack_zone(thread);
+  HANDLESCOPE(thread);
+  Zone* zone = thread->zone();
+  const auto& id =
+      String::Handle(zone, String::New(declaration_id, Heap::kOld));
+  const intptr_t entry = MaotRegistry::IndexOf(thread, id);
+  if (entry < 0) return -1;
+  const auto& tramp =
+      Code::Handle(zone, MaotRegistry::TrampolineAt(thread, entry));
+  if (tramp.IsNull()) return 0;  // no trampoline
+  const auto& fn =
+      Function::Handle(zone, MaotRegistry::CurrentImplAt(thread, entry));
+  if (fn.IsNull() || !fn.HasCode()) return -4;
+  // 1 = trampoline present and it is the Function's current code;
+  // 2 = present but the Function points elsewhere.
+  return fn.CurrentCode() == tramp.ptr() ? 1 : 2;
+}
+
 MAOT_TEST_EXPORT int64_t Dart_MaotCurrentVersionForTesting(const char* declaration_id) {
   Thread* thread = Thread::Current();
   if (thread == nullptr) return -10;
