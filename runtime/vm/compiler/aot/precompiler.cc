@@ -1737,14 +1737,54 @@ void Precompiler::SeedMutableAotRoots() {
     // not a safety argument, so it fails closed until #69 makes it true.
     if (fn.IsDynamicFunction(/*allow_abstract=*/true) ||
         fn.IsImplicitInstanceClosureFunction()) {
+      // MAOT-5 (#69). One record PER DISPATCH FORM, not one coarse record for
+      // all of them. The single "instance-dispatch" record mixed a form that
+      // is now proven with six that are not, so it could neither be kept
+      // honestly nor cleared honestly.
+      //
+      // The dispatch table is SLOT_PRESERVING: its frozen slot holds this
+      // declaration's trampoline, and the trampoline loads the mutable cell
+      // on every call, so the frozen target permanently selects the current
+      // body. That is measured -- the slot is counted in
+      // VerifyMaotDispatchTableTargets and the route is exercised end to end.
+      //
+      // Every other form still fails closed. Each blocking record contributes
+      // ONE escape, and StageReplacement refuses while any escape stands, so
+      // the granular records are what the install decision actually reads:
+      // proving a form flips its record to SLOT_PRESERVING, which removes its
+      // escape, and only when all of them are proven does the declaration
+      // become installable. Nothing here makes Alpha.v installable today.
+      const auto& decl =
+          String::Handle(Z, MaotRegistry::DeclarationIdOf(T, fn));
+      const auto& caller =
+          String::Handle(Z, MaotRegistry::AnyDeclarationIdOf(T, fn));
       MaotRegistry::NoteDecision(
-          T, String::Handle(Z, MaotRegistry::DeclarationIdOf(T, fn)),
-          String::Handle(Z, MaotRegistry::AnyDeclarationIdOf(T, fn)),
-          "instance-dispatch",
-          "a selected instance member is reachable through dispatch forms "
-          "#68 does not model; #69 owns virtual, interface, super and "
-          "dynamic dispatch",
-          MaotRegistry::kUnmodeledBlocking);
+          T, decl, caller, "instance-dispatch/dispatch-table",
+          "the AOT dispatch-table slot for this declaration holds its "
+          "trampoline, which loads the mutable cell on every call, so the "
+          "frozen executable target selects the current implementation",
+          MaotRegistry::kSlotPreserving);
+
+      static const char* const kUnprovenStates[] = {
+          "instance-dispatch/UnlinkedCall",
+          "instance-dispatch/monomorphic",
+          "instance-dispatch/MonomorphicSmiableCall",
+          "instance-dispatch/SingleTargetCache",
+          "instance-dispatch/ICData",
+          "instance-dispatch/MegamorphicCache",
+      };
+      for (const char* state : kUnprovenStates) {
+        MaotRegistry::NoteDecision(
+            T, decl, caller, state,
+            "this switchable-call state has not been shown to converge on "
+            "the declaration trampoline; #69 owes it separate mechanical "
+            "evidence",
+            MaotRegistry::kUnmodeledBlocking);
+        // No explicit NoteEscapeById here: NoteDecision already projects a
+        // blocking disposition into an escape. Calling both would count each
+        // unproven state twice and make the escape total meaningless as a
+        // count of what actually blocks.
+      }
     }
 
     // MAOT-4 (#68) falsification control: attribute one decision with the
@@ -1916,8 +1956,41 @@ void Precompiler::DumpMaotTrampolineShapes() {
 }
 
 void Precompiler::VerifyMaotDispatchTableTargets() {
-  if (!FLAG_maot_install_trampolines) return;
   if (!FLAG_maot_trace_registration && !FLAG_maot_dump_trampoline_shape) return;
+  // ONE CELL -> ONE POOL ENTRY. Before seeding, #67's lowering called
+  // LoadUniqueObject at every call site, and that appends a new entry each
+  // time -- a declaration with three static call sites had three pool entries
+  // for one cell, and no single entry a trampoline could name. Counted here
+  // rather than argued, and counted for declarations that DO have several
+  // static call sites, which is the case that used to duplicate.
+  {
+    const auto& pool =
+        ObjectPool::Handle(Z, IG->object_store()->global_object_pool());
+    const intptr_t n = MaotRegistry::Length(T);
+    auto& cell = Array::Handle(Z);
+    auto& id = String::Handle(Z);
+    intptr_t worst = 0;
+    for (intptr_t i = 0; i < n && !pool.IsNull(); i++) {
+      cell = MaotRegistry::DispatchCellAt(T, i);
+      if (cell.IsNull()) continue;
+      intptr_t occurrences = 0;
+      for (intptr_t j = 0; j < pool.Length(); j++) {
+        if (pool.TypeAt(j) != ObjectPool::EntryType::kTaggedObject) continue;
+        if (pool.ObjectAt(j) == cell.ptr()) occurrences++;
+      }
+      if (occurrences > worst) worst = occurrences;
+      id = MaotRegistry::DeclarationIdAt(T, i);
+      OS::PrintErr("[maot] pool entries for the cell of %s: %" Pd
+                   " (static call sites %" Pd ")\n",
+                   id.IsNull() ? "<null>" : id.ToCString(), occurrences,
+                   MaotRegistry::CallSiteCountFor(
+                       T, Function::Handle(
+                              Z, MaotRegistry::CurrentImplAt(T, i))));
+    }
+    OS::PrintErr("[maot] MAX pool entries for any one cell: %" Pd "%s\n",
+                 worst, worst > 1 ? "  <-- DUPLICATED" : "");
+  }
+  if (!FLAG_maot_install_trampolines) return;
   // IDENTITY, not behaviour: does the dispatch table -- the structure a real
   // virtual call actually indexes -- hold this declaration's trampoline as
   // the executable target? Behavioural evidence that a cell swap is observed
