@@ -1609,6 +1609,37 @@ void Precompiler::SeedMutableAotRoots() {
   bool selected = false;
   intptr_t seeded = 0;
   intptr_t skipped_abstract = 0;
+
+  // MAOT-5 (#69). Give every selected declaration's cell ONE canonical entry
+  // in the global object pool, here, while the builder is still live and
+  // before Iterate() compiles anything.
+  //
+  // Pool membership becomes a property of being SELECTED rather than a side
+  // effect of #67's static-call lowering having run. A purely virtual
+  // declaration has no static call site, so nothing added its cell to the
+  // pool, so no trampoline could name it -- the reason virtual routing had
+  // nothing to route through.
+  //
+  // kPatchable, not FindObject: a non-patchable entry is deduped through
+  // ObjIndexPair::Hash -> Instance::CanonicalizeHash, which faults on an
+  // Array holding a VM Function. #67 found that; this must not rediscover it.
+  {
+    auto& cell = Array::Handle(Z);
+    intptr_t pooled = 0;
+    for (intptr_t i = 0; i < entries; i++) {
+      if (MaotRegistry::CellPoolIndexAt(T, i) >= 0) continue;
+      cell = MaotRegistry::DispatchCellAt(T, i);
+      if (cell.IsNull()) continue;
+      const intptr_t index = global_object_pool_builder()->AddObject(
+          cell, compiler::ObjectPoolBuilderEntry::kPatchable);
+      MaotRegistry::SetCellPoolIndexAt(T, i, index);
+      pooled++;
+    }
+    if (FLAG_maot_trace_registration) {
+      OS::PrintErr("[maot] seeded %" Pd " dispatch cells into the global "
+                   "object pool\n", pooled);
+    }
+  }
   for (intptr_t i = 0; i < entries; i++) {
     MaotRegistry::EntryAt(T, i, &id, &selected, &fn, &abi);
     if (!selected || fn.IsNull()) continue;
@@ -2002,11 +2033,12 @@ CodePtr Precompiler::GenerateMaotTrampoline(const Array& cell,
                                             const Function& owner) {
 #if defined(TARGET_ARCH_ARM64) && defined(DART_PRECOMPILER)
   if (cell.IsNull() || owner.IsNull()) return Code::null();
-  const intptr_t cell_pool_index = FindCellInGlobalPool(cell);
+  const intptr_t cell_pool_index =
+      MaotRegistry::CellPoolIndexForFunction(T, owner);
   if (cell_pool_index < 0) {
-    // No call site referenced this cell, so it is not in the sealed pool and
-    // the trampoline has no legal way to name it. Refusing is correct: a
-    // trampoline that cannot reach its own cell is worse than none.
+    // The cell was never seeded into the pool, so the trampoline has no legal
+    // way to name it. Refusing is correct: a trampoline that cannot reach its
+    // own cell is worse than none.
     if (FLAG_maot_trace_registration) {
       OS::PrintErr("[maot] no pool entry for the cell of %s; no trampoline\n",
                    owner.ToCString());
@@ -2156,6 +2188,7 @@ void Precompiler::MaterializeMutableAotRegistry() {
   GrowableArray<const String*> keep_call_convs;
   GrowableArray<const Array*> keep_cells;
   GrowableArray<intptr_t> keep_call_sites;
+  GrowableArray<intptr_t> keep_cell_pool_index;
   GrowableArray<intptr_t> keep_inline_refusals;
   GrowableArray<intptr_t> keep_inline_admissions;
   GrowableArray<intptr_t> keep_escapes;
@@ -2214,6 +2247,11 @@ void Precompiler::MaterializeMutableAotRegistry() {
     // after it. Re-registering without it reported zero emitted call sites
     // for declarations that had eleven.
     keep_call_sites.Add(MaotRegistry::CallSiteCountFor(T, fn));
+    // The seeded pool index was assigned before compilation and is baked
+    // into every emitted call site. Losing it here would leave the
+    // trampoline unable to name the cell those sites already load -- the
+    // same class of defect as dropping the call-site count or the escapes.
+    keep_cell_pool_index.Add(MaotRegistry::CellPoolIndexForFunction(T, fn));
     // Same reason, same failure mode: the inliner ran before this rebuild.
     {
       intptr_t refusals = 0, admissions = 0;
@@ -2248,6 +2286,7 @@ void Precompiler::MaterializeMutableAotRegistry() {
                                           *keep_call_convs[i], *keep_cells[i],
                                           *keep_ids[i]);
     MaotRegistry::SetCallSiteCountFor(T, *keep_ids[i], keep_call_sites[i]);
+    MaotRegistry::SetCellPoolIndexAt(T, i, keep_cell_pool_index[i]);
     MaotRegistry::SetInlineCountsFor(T, *keep_ids[i], keep_inline_refusals[i],
                                      keep_inline_admissions[i]);
     MaotRegistry::SetEscapeStateFor(T, *keep_ids[i], keep_escapes[i],

@@ -453,7 +453,25 @@ void FlowGraphCompiler::GenerateStaticDartCall(intptr_t deopt_id,
       // call site being emitted. "Unique" is also the right meaning: each
       // declaration's cell is a distinct identity that must never be merged
       // with another's.
-      __ LoadUniqueObject(FUNCTION_REG, cell);
+      // The ONE seeded entry, not a fresh registration. LoadUniqueObject
+      // calls AddObject(kPatchable), which appends a NEW pool entry on every
+      // call -- so a declaration with three call sites got three entries for
+      // one cell, and #69's trampoline had no single entry to name. Reading
+      // the seeded index gives DeclarationId -> one cell -> one pool entry,
+      // shared by this lowering and the trampoline.
+      const intptr_t maot_pool_index =
+          MaotRegistry::CellPoolIndexForFunction(thread(), target);
+      if (maot_pool_index < 0) {
+        // Fail closed rather than registering a second copy: two pool
+        // identities for one cell is the defect this replaces.
+        MaotRegistry::NoteEscapeById(
+            thread(),
+            String::Handle(zone(),
+                           MaotRegistry::DeclarationIdOf(thread(), target)),
+            "the dispatch cell has no seeded global-pool entry, so the call "
+            "site cannot name the same cell the trampoline does");
+      }
+      __ LoadWordFromPoolIndex(FUNCTION_REG, maot_pool_index);
       __ LoadCompressed(
           FUNCTION_REG,
           compiler::FieldAddress(FUNCTION_REG,
