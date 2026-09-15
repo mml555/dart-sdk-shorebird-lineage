@@ -74,6 +74,27 @@ DEFINE_FLAG(charp,
             "measured rather than argued from the enum.");
 
 DEFINE_FLAG(bool,
+            maot_trace_serializer,
+            false,
+            "DIAGNOSTIC. Bracket every Code serialization operation into a "
+            "file, so the last successful and first failing operation are "
+            "known rather than inferred. File-backed because stderr is lost "
+            "when the process dies mid-write.");
+
+DEFINE_FLAG(charp,
+            maot_trampoline_only,
+            nullptr,
+            "DIAGNOSTIC. Install a trampoline only for declarations whose id "
+            "contains this substring.");
+
+DEFINE_FLAG(charp,
+            maot_trampoline_skip,
+            nullptr,
+            "DIAGNOSTIC. Skip declarations whose id contains this substring, "
+            "so a given declaration can be moved off a particular ordinal "
+            "while the trampoline count is held fixed.");
+
+DEFINE_FLAG(bool,
             maot_dump_trampoline_shape,
             false,
             "DIAGNOSTIC. Before serialization, dump the complete Code shape "
@@ -874,6 +895,20 @@ CodePtr MaotRegistry::CellImplCodeAt(Thread* thread, intptr_t entry) {
   if (cell == Array::null()) return Code::null();
   const ObjectPtr raw = Array::Handle(thread->zone(), cell).At(kCellImplCode);
   return raw == Object::null() ? Code::null() : Code::RawCast(raw);
+}
+
+StringPtr MaotRegistry::DeclarationIdAt(Thread* thread, intptr_t entry) {
+  const ObjectPtr raw = FieldAt(thread, entry, kDeclarationId);
+  return raw == Object::null() ? String::null() : String::RawCast(raw);
+}
+
+bool MaotRegistry::IsTrampolineCode(Thread* thread, ObjectPtr code) {
+  if (code == Object::null()) return false;
+  const intptr_t entries = Length(thread);
+  for (intptr_t i = 0; i < entries; i++) {
+    if (FieldAt(thread, i, kTrampolineCode) == code) return true;
+  }
+  return false;
 }
 
 void MaotRegistry::SetTrampolineFor(Thread* thread,
