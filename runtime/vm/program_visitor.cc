@@ -5,6 +5,7 @@
 #if !defined(DART_PRECOMPILED_RUNTIME)
 
 #include "vm/program_visitor.h"
+#include "vm/maot_registry.h"
 
 #include "vm/canonical_tables.h"
 #include "vm/closure_functions_cache.h"
@@ -1345,6 +1346,26 @@ void ProgramVisitor::DedupInstructions(Thread* thread) {
           }
         }
       }
+
+      // MUTABLE-AOT (#69). The registry pins Code objects that nothing else
+      // holds, and once a declaration Function's CurrentCode is the
+      // trampoline, its BODY Code is reachable only from these pins. They
+      // must be canonicalized here for the same reason the dispatch table is:
+      // a pin left holding a pre-dedup object keeps two Code objects with
+      // identical Instructions reachable, which the serializer refuses
+      // outright in precompiled mode.
+      //
+      // Doing it HERE rather than in RepinCurrentCode is what makes the
+      // trampoline design work at all. The old repin re-derived each pin from
+      // implFunction.CurrentCode(); after the trampoline is installed that
+      // expression returns the TRAMPOLINE, so re-deriving would set the cell's
+      // Code half to the trampoline and the trampoline would branch to
+      // itself. The body must be canonicalized as an independent pin, never
+      // rediscovered through the declaration Function.
+      MaotRegistry::CanonicalizeCodePins(
+          Thread::Current(), zone_, [&](const Code& c) -> CodePtr {
+            return should_canonicalize(c) ? Canonicalize(c) : c.ptr();
+          });
 
       // If there's a global object pool, add any visitable objects.
       pool = object_store->global_object_pool();

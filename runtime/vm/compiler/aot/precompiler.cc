@@ -750,6 +750,10 @@ void Precompiler::DoCompileAll() {
       // kept, so it can no longer resurrect anything.
       MaterializeMutableAotRegistry();
 
+      // MAOT-5 (#69): between these two on purpose. See
+      // InstallMaotTrampolines for why this is the only correct window.
+      InstallMaotTrampolines();
+
       FinalizeDispatchTable();
       ReplaceFunctionStaticCallEntries();
 
@@ -1748,6 +1752,113 @@ void Precompiler::SeedMutableAotRoots() {
                  skipped_abstract);
   }
 }
+
+// MAOT-5 (#69). Lives HERE, not in maot_registry.cc: that file is compiled
+// into the AOT RUNTIME as well as the precompiler, and the runtime may not
+// include compiler headers ("AOT runtime should not use compiler sources").
+// The trampoline needs an Assembler, so it is precompiler-only by
+// construction.
+void Precompiler::InstallMaotTrampolines() {
+  // ORDERING, and it is the whole design. This runs AFTER
+  // MaterializeMutableAotRegistry (so every cell exists and holds the body
+  // Code) and BEFORE FinalizeDispatchTable (so the table captures the
+  // trampoline rather than a frozen body address).
+  //
+  // A previous reading of this issue asked for installation after the
+  // post-dedup repin instead. That window does not exist: the dispatch table
+  // is built at FinalizeDispatchTable, a whole phase before the repin. What
+  // makes installing early safe is that ProgramVisitor::Dedup canonicalizes
+  // dispatch_table_code_entries in place, so a trampoline captured here is
+  // not stranded on a pre-dedup Code -- and the registry's own pins are
+  // canonicalized in the same pass for the same reason.
+  const intptr_t entries = MaotRegistry::Length(T);
+  intptr_t installed = 0, skipped = 0;
+  auto& fn = Function::Handle(Z);
+  auto& cell = Array::Handle(Z);
+  auto& body = Code::Handle(Z);
+  auto& tramp = Code::Handle(Z);
+  for (intptr_t i = 0; i < entries; i++) {
+    fn ^= MaotRegistry::CurrentImplAt(T, i);
+    cell ^= MaotRegistry::DispatchCellAt(T, i);
+    if (fn.IsNull() || cell.IsNull() || !fn.HasCode()) {
+      skipped++;
+      continue;
+    }
+    // The body must already be pinned in the cell before the Function stops
+    // pointing at it. After AttachCode the registry is the only holder.
+    body ^= MaotRegistry::CellImplCodeAt(T, i);
+    if (body.IsNull()) {
+      skipped++;
+      continue;
+    }
+    tramp ^= GenerateMaotTrampoline(cell, fn);
+    if (tramp.IsNull()) {
+      skipped++;
+      continue;
+    }
+    fn.AttachCode(tramp);
+    MaotRegistry::SetTrampolineFor(T, i, tramp);
+    installed++;
+  }
+  if (FLAG_maot_trace_registration) {
+    OS::PrintErr("[maot] installed %" Pd " dispatch trampolines (%" Pd
+                 " skipped)\n", installed, skipped);
+  }
+}
+
+CodePtr Precompiler::GenerateMaotTrampoline(const Array& cell,
+                                            const Function& owner) {
+#if defined(TARGET_ARCH_ARM64) && defined(DART_PRECOMPILER)
+  // No locals named `thread` or `zone` here: T and Z expand to thread() and
+  // zone(), so a local of either name shadows the member function and the
+  // macro then tries to call the local pointer.
+  if (cell.IsNull() || owner.IsNull()) return Code::null();
+
+  compiler::ObjectPoolBuilder local_pool;
+  Precompiler* precompiler = Precompiler::Instance();
+  compiler::ObjectPoolBuilder* pool =
+      precompiler != nullptr ? precompiler->global_object_pool_builder()
+                             : &local_pool;
+  compiler::Assembler assembler(pool);
+  CompilerState state(T, /*is_aot=*/true, /*is_optimizing=*/false);
+
+  // The monomorphic entry is not decoration. DoUnlinkedCallAOT asserts
+  // code.HasMonomorphicEntry() before patching a call site to the
+  // monomorphic state, and in AOT that predicate is
+  // entry_point_ != monomorphic_entry_point_ -- which only this prologue
+  // produces.
+  assembler.MonomorphicCheckedEntryAOT();
+
+  // Branch through the cell's CODE half, never its Function half. Going via
+  // cell[kCellImplFunction]'s entry point would return here: this trampoline
+  // IS that Function's CurrentCode in release state, so the load would be a
+  // self-cycle and every mutable call would recurse forever.
+  assembler.LoadUniqueObject(TMP, cell);
+  assembler.LoadCompressed(
+      CODE_REG,
+      compiler::FieldAddress(
+          TMP, compiler::target::Array::element_offset(MaotRegistry::kCellImplCode)));
+  // CODE_REG is left holding the implementation Code across the branch,
+  // which is what a callee expecting its own Code will find there.
+  assembler.ldr(TMP, compiler::FieldAddress(
+                         CODE_REG,
+                         compiler::target::Code::entry_point_offset()));
+  assembler.br(TMP);
+
+  const auto& code = Code::Handle(
+      Z, Code::FinalizeCode(nullptr, &assembler,
+                               Code::PoolAttachment::kNotAttachPool,
+                               /*optimized=*/false, /*stats=*/nullptr));
+  // DoSingleTargetMissAOT recovers the declaration with
+  // Function::RawCast(old_target_code.owner()), so an owner that is not this
+  // declaration silently breaks single-target range extension.
+  code.set_owner(owner);
+  return code.ptr();
+#else
+  return Code::null();
+#endif
+}
+
 
 void Precompiler::RepinMutableAotImplementations() {
   const intptr_t entries = MaotRegistry::Length(T);
