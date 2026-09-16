@@ -81,6 +81,40 @@ bool _isMaotMutable(Member member) {
 }
 
 
+/// Whether [member]'s own analysis summary produces a constant result
+/// (MUTABLE-AOT #68, interim fail-closed posture).
+///
+/// Asked per DECLARATION, not per call site, and that is the point. The direct
+/// call site's constant is suppressed by [_callsMaotMutable], but suppression
+/// happens when the annotation is EMITTED -- the constant is an attribute of
+/// the Type flowing through the analysis, and it has already propagated into
+/// the summary of any non-mutable function that returns the mutable call's
+/// value. Every caller of that function then folds the release answer, and
+/// neither the front-end suppression nor the VM backstop is looking at that
+/// call, because its target is the intermediary.
+///
+/// A mutable declaration whose summary result is constant is the necessary
+/// precondition for that escape. Recording it lets the install path refuse
+/// rather than report success while the caller keeps the release value. It is
+/// deliberately an OVER-approximation: it also catches declarations whose
+/// constant never actually escapes. A false refusal is the acceptable failure
+/// here; a false successful installation is not.
+///
+/// The constant test mirrors `_convertType` exactly, including the nullable
+/// empty case that folds to the null constant, so this cannot conclude "no
+/// constant" for a shape the annotator would have folded.
+bool _maotSummaryResultIsConstant(TypeFlowAnalysis tfa, Member member) {
+  if (member is! Procedure || member.isSetter) return false;
+  if (!tfa.isMemberUsed(member)) return false;
+  Type? result = tfa.resultType(member);
+  if (result == null) return false;
+  final bool nullable = result is NullableType;
+  if (nullable) result = (result as NullableType).baseType;
+  if (nullable && result == emptyType) return true;
+  if (nullable) return false;
+  return result is ConcreteType && result.attributes?.constant != null;
+}
+
 /// MEASUREMENT ONLY (#68 performance accounting), read once from the
 /// environment. An environment variable rather than a VM flag because this
 /// code runs inside gen_kernel, which does not take VM flags.
@@ -280,7 +314,9 @@ Component transformComponent(
   // Selection was decided before tree shaking and travels as a set of ids, so
   // moving the ATTACHMENT later does not weaken the selection contract.
   final maotMetadata = MaotDeclarationIdMetadataRepository();
-  maotMetadata.index(component, maotIdentity, selectedIds: maotSelectedIds);
+  maotMetadata.index(component, maotIdentity, selectedIds: maotSelectedIds,
+      constantReturning: (member) =>
+          _maotSummaryResultIsConstant(typeFlowAnalysis, member));
   maotMetadata.recordSelectedAbsences(maotSelectedIds);
   component.addMetadataRepository(maotMetadata);
   if (const bool.fromEnvironment('maot.trace')) {
