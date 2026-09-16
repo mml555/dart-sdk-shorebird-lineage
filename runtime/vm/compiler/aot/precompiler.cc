@@ -1785,6 +1785,22 @@ void Precompiler::SeedMutableAotRoots() {
           // is the dispatch table and nothing else, which is the concrete
           // mechanism -- not a conversion of the old placeholder.
           "interface/dispatch-table",
+          // A `super` call is a STATIC invocation, so it takes #67's existing
+          // static call-site lowering and no second mechanism was built for
+          // it. Measured on a declaration reachable only through super: one
+          // static call site on seeded cell index 11, the cell's
+          // implFunction owner moving Base -> BaseNew -> BaseNew2 -> BaseNew
+          // while the pool index never moved, behaviour following it, 50,000
+          // warm calls changing no routing, no switchable state entered, and
+          // the subclass override still SUB-OVERRIDE throughout -- so this is
+          // not virtual dispatch wearing a different name.
+          //
+          // Every earlier super run was taken while #68's transitive constant
+          // hole was live, and the fixture's constant return through a
+          // non-mutable viaSuper() is exactly the failing shape. Two
+          // diagnoses were retracted on that evidence. This classification
+          // rests only on the post-P1 run.
+          "super/static-cell",
       };
       for (const char* form : kProvenForms) {
         MaotRegistry::NoteDecision(
@@ -1803,7 +1819,6 @@ void Precompiler::SeedMutableAotRoots() {
           "dynamic/MonomorphicSmiableCall",
           "dynamic/SingleTargetCache",
           "dynamic/MegamorphicCache",
-          "super/unproven",
       };
       for (const char* form : kUnprovenForms) {
         MaotRegistry::NoteDecision(
