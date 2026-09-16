@@ -122,16 +122,18 @@ DEFINE_FLAG(bool,
             "comparison rather than by guessing which field to add next.");
 
 DEFINE_FLAG(bool,
-            maot_disable_constant_escape_block,
+            maot_constant_escape_block,
             false,
-            "FALSIFICATION CONTROL. Stop recording the #68 P3 decision that "
-            "refuses a declaration whose own summary result is constant. With "
-            "it set, the transitive-escape defect is reachable again: the "
-            "install reports success, the cell holds the replacement, and the "
-            "caller keeps the release constant. It is also how the P3 posture "
-            "is measured against a baseline -- without it, the cost of the "
-            "interim refusal cannot be separated from the cost of anything "
-            "else.");
+            "FALLBACK POSTURE (#68 P3), OFF in the normal configuration. "
+            "Refuses installation for any declaration whose own summary "
+            "result is constant, on the grounds that such a constant CAN "
+            "escape into a non-mutable intermediary's summary. P1 removes the "
+            "constant at its origin and is the production fix, so this must "
+            "stay off alongside it -- left enabled it would refuse the very "
+            "declarations P1 restored, and hide whether P1 works. Retained "
+            "because it is a safe mode if P1 is ever switched off, and "
+            "because it is coarse ON PURPOSE: it blocks declarations whose "
+            "constant never actually escapes.");
 
 DEFINE_FLAG(bool,
             maot_dump_string_pool_entries,
