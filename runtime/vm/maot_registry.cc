@@ -2361,6 +2361,102 @@ MAOT_TEST_EXPORT int64_t Dart_MaotUnlinkedTransition(int64_t flag,
       flag != 0, static_cast<intptr_t>(cid));
 }
 
+// Identity report for one declaration, written as plain lines to a file.
+//
+// The question is where a static call actually goes after a cell swap, so
+// every object on that path is reported by ADDRESS, and the pool entry the
+// call site would load is cross-checked against the registry's own cell. If
+// those two differ, the call site and the swap are operating on different
+// objects and nothing downstream matters.
+MAOT_TEST_EXPORT int64_t Dart_MaotIdentityReport(const char* declaration_id,
+                                                 const char* path) {
+  Thread* thread = Thread::Current();
+  if (thread == nullptr) return -10;
+  TransitionNativeToVM transition(thread);
+  StackZone stack_zone(thread);
+  HANDLESCOPE(thread);
+  Zone* zone = thread->zone();
+  FILE* f = fopen(path, "a");
+  if (f == nullptr) return -1;
+  const auto& id = String::Handle(zone,
+                                  String::New(declaration_id, Heap::kOld));
+  const intptr_t entry = MaotRegistry::IndexOf(thread, id);
+  if (entry < 0) {
+    fprintf(f, "decl=%s  NOT IN REGISTRY\n", declaration_id);
+    fclose(f);
+    return -2;
+  }
+  const auto& cell =
+      Array::Handle(zone, MaotRegistry::DispatchCellAt(thread, entry));
+  const auto& impl_fn = Function::Handle(zone,
+      cell.IsNull() ? Function::null()
+                    : Function::RawCast(cell.At(MaotRegistry::kCellImplFunction)));
+  const auto& impl_code = Object::Handle(zone,
+      cell.IsNull() ? Object::null() : cell.At(MaotRegistry::kCellImplCode));
+  const auto& decl_fn =
+      Function::Handle(zone, MaotRegistry::CurrentImplAt(thread, entry));
+  const auto& tramp =
+      Code::Handle(zone, MaotRegistry::TrampolineAt(thread, entry));
+  const intptr_t pool_index = MaotRegistry::CellPoolIndexAt(thread, entry);
+  const auto& pool = ObjectPool::Handle(zone,
+      thread->isolate_group()->object_store()->global_object_pool());
+  const auto& pooled = Object::Handle(zone,
+      (pool.IsNull() || pool_index < 0 || pool_index >= pool.Length())
+          ? Object::null()
+          : pool.ObjectAt(pool_index));
+
+  // Identity RELATIONS, not addresses. The questions are all "is this the
+  // same object as that", and relations answer them without needing raw
+  // pointers (untag() is protected outside member functions anyway).
+  const auto& impl_current = Object::Handle(zone,
+      impl_fn.IsNull() || !impl_fn.HasCode() ? Object::null()
+                                             : impl_fn.CurrentCode());
+  const auto& decl_current = Object::Handle(zone,
+      decl_fn.IsNull() || !decl_fn.HasCode() ? Object::null()
+                                             : decl_fn.CurrentCode());
+  // Does the replacement carry its OWN trampoline, and its own cell?
+  const intptr_t impl_entry = impl_fn.IsNull()
+      ? -1
+      : MaotRegistry::IndexOf(
+            thread, String::Handle(zone,
+                                   MaotRegistry::DeclarationIdOf(thread,
+                                                                 impl_fn)));
+  const auto& impl_tramp = Code::Handle(zone,
+      impl_entry < 0 ? Code::null()
+                     : MaotRegistry::TrampolineAt(thread, impl_entry));
+  const auto& impl_own_cell = Array::Handle(zone,
+      impl_entry < 0 ? Array::null()
+                     : MaotRegistry::DispatchCellAt(thread, impl_entry));
+  const auto& impl_own_cell_code = Object::Handle(zone,
+      impl_own_cell.IsNull() ? Object::null()
+                             : impl_own_cell.At(MaotRegistry::kCellImplCode));
+
+  fprintf(f, "decl=%s\n", declaration_id);
+  fprintf(f, "  cell.implFunction        = %s\n",
+          impl_fn.IsNull() ? "<null>" : impl_fn.ToCString());
+  fprintf(f, "  seeded pool index        = %" Pd "\n", pool_index);
+  fprintf(f, "  pool[index] IS the cell  = %s\n",
+          (!cell.IsNull() && pooled.ptr() == cell.ptr()) ? "YES" : "NO");
+  fprintf(f, "  declFn has trampoline    = %s\n",
+          tramp.IsNull() ? "no" : "yes");
+  fprintf(f, "  declFn.CurrentCode==tramp= %s\n",
+          (!tramp.IsNull() && decl_current.ptr() == tramp.ptr()) ? "YES"
+                                                                : "no");
+  fprintf(f, "  cell.implCode==implFn.cur= %s\n",
+          (impl_code.ptr() == impl_current.ptr()) ? "YES" : "NO");
+  fprintf(f, "  implFn has own trampoline= %s\n",
+          impl_tramp.IsNull() ? "no" : "yes");
+  fprintf(f, "  implFn.CurrentCode==its tr= %s\n",
+          (!impl_tramp.IsNull() && impl_current.ptr() == impl_tramp.ptr())
+              ? "YES" : "no");
+  fprintf(f, "  cell.implCode==its own body= %s\n",
+          (!impl_own_cell_code.IsNull() &&
+           impl_code.ptr() == impl_own_cell_code.ptr()) ? "YES" : "no");
+  fflush(f);
+  fclose(f);
+  return 0;
+}
+
 MAOT_TEST_EXPORT int64_t Dart_MaotDivergedStateCount(const char* state) {
   Thread* thread = Thread::Current();
   if (thread == nullptr) return -10;
