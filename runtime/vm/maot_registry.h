@@ -312,6 +312,15 @@ class MaotRegistry : public AllStatic {
   static intptr_t SwitchableStateDivergences(const char* state);
   static bool ShouldRecordSwitchableState(intptr_t hit_number);
   static bool IsTrampolineCode(Thread* thread, ObjectPtr code);
+  static void BlockingRecordsFor(Thread* thread,
+                                 const String& declaration_id,
+                                 BaseTextBuffer* out);
+
+  // True when writing `impl_code` into this entry's cell would make its own
+  // trampoline branch to itself. Checked at every cell write.
+  static bool CellCodeWouldSelfCycle(Thread* thread,
+                                     intptr_t entry,
+                                     const Object& impl_code);
   static void SetTrampolineFor(Thread* thread,
                                intptr_t entry,
                                const Code& trampoline);
