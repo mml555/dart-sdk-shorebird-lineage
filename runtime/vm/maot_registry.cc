@@ -3,6 +3,7 @@
 // BSD-style license that can be found in the LICENSE file.
 
 #include "vm/maot_registry.h"
+#include "vm/code_patcher.h"
 
 #include <cstring>
 
@@ -2378,6 +2379,16 @@ MAOT_TEST_EXPORT int64_t Dart_MaotObservedStateCount(const char* state) {
 // retaining executable body Code instead of the trampoline.
 // (can_patch_to_monomorphic, resulting state cid) -> times observed.
 // Encoded as flag*1000000 + cid so one integer carries the pair.
+static uword g_maot_last_switchable_site = 0;
+
+void MaotRegistry::RememberSwitchableSite(uword return_address) {
+  g_maot_last_switchable_site = return_address;
+}
+
+uword MaotRegistry::RememberedSwitchableSite() {
+  return g_maot_last_switchable_site;
+}
+
 uword MaotRegistry::DeclarationTrampolineEntry(Thread* thread,
                                                const Function& function) {
   if (function.IsNull()) return 0;
@@ -2388,6 +2399,53 @@ uword MaotRegistry::DeclarationTrampolineEntry(Thread* thread,
   if (entry < 0) return 0;
   const auto& tramp = Code::Handle(zone, TrampolineAt(thread, entry));
   return tramp.IsNull() ? 0 : tramp.EntryPoint();
+}
+
+// Re-reads the state object living at the remembered switchable call site.
+//
+// This is what turns "no miss was counted, so nothing can have re-patched the
+// site" into a reading. A switchable call site is only re-patched by a miss,
+// and MonomorphicSmiableCall's fields are written once in New() -- but both
+// of those are arguments, and the question #69 asks of this state is precisely
+// whether a frozen executable address still points where it did.
+MAOT_TEST_EXPORT int64_t Dart_MaotInspectSwitchableSite(
+    const char* declaration_id,
+    const char* out_path) {
+  Thread* thread = Thread::Current();
+  if (thread == nullptr) return -10;
+  TransitionNativeToVM transition(thread);
+  StackZone stack_zone(thread);
+  HANDLESCOPE(thread);
+  Zone* zone = thread->zone();
+  const uword pc = MaotRegistry::RememberedSwitchableSite();
+  if (pc == 0) return -1;
+  const auto& caller = Code::Handle(zone, Code::FindCodeUnsafe(pc));
+  if (caller.IsNull()) return -2;
+  const auto& data =
+      Object::Handle(zone, CodePatcher::GetSwitchableCallDataAt(pc, caller));
+  FILE* f = fopen(out_path, "a");
+  if (f == nullptr) return -3;
+  const auto& id = String::Handle(zone, String::New(declaration_id, Heap::kOld));
+  const intptr_t entry = MaotRegistry::IndexOf(thread, id);
+  uword tramp_entry = 0;
+  if (entry >= 0) {
+    const auto& tramp = Code::Handle(zone, MaotRegistry::TrampolineAt(thread, entry));
+    if (!tramp.IsNull()) tramp_entry = tramp.EntryPoint();
+  }
+  uword stored = 0;
+  intptr_t expected_cid = -1;
+  if (data.IsMonomorphicSmiableCall()) {
+    stored = MonomorphicSmiableCall::Cast(data).entrypoint();
+    expected_cid = MonomorphicSmiableCall::Cast(data).expected_cid();
+  }
+  fprintf(f,
+          "site=0x%" Px " state=%s expected_cid=%" Pd " stored_entry=0x%" Px
+          " trampoline_entry=0x%" Px " equal=%s\n",
+          pc, data.IsNull() ? "<null>" : data.ToCString(), expected_cid, stored,
+          tramp_entry,
+          (tramp_entry != 0 && stored == tramp_entry) ? "YES" : "NO");
+  fclose(f);
+  return 0;
 }
 
 MAOT_TEST_EXPORT int64_t Dart_MaotUnlinkedTransition(int64_t flag,
