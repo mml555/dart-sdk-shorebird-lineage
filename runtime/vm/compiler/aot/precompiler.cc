@@ -2069,6 +2069,24 @@ void Precompiler::VerifyMaotDispatchTableTargets() {
     OS::PrintErr("[maot] MAX pool entries for any one cell: %" Pd "%s\n",
                  worst, worst > 1 ? "  <-- DUPLICATED" : "");
   }
+  // A caller can load a MUTABLE FUNCTION'S CELL and still not use what the
+  // call returns. Dumping the string-valued pool entries with the same byte
+  // offset formula lets a `ldr x2,[PP,#N]` next to a discarded call result be
+  // resolved to the literal it actually feeds, instead of inferred.
+  if (FLAG_maot_dump_string_pool_entries) {
+    const auto& pool =
+        ObjectPool::Handle(Z, IG->object_store()->global_object_pool());
+    auto& obj = Object::Handle(Z);
+    for (intptr_t j = 0; j < (pool.IsNull() ? 0 : pool.Length()); j++) {
+      if (pool.TypeAt(j) != ObjectPool::EntryType::kTaggedObject) continue;
+      obj = pool.ObjectAt(j);
+      if (!obj.IsString()) continue;
+      OS::PrintErr("[maot-strpool] index %" Pd " offset %" Pd " = \"%s\"\n", j,
+                   static_cast<intptr_t>(
+                       compiler::target::ObjectPool::element_offset(j)),
+                   obj.ToCString());
+    }
+  }
   if (!FLAG_maot_install_trampolines) return;
   // IDENTITY, not behaviour: does the dispatch table -- the structure a real
   // virtual call actually indexes -- hold this declaration's trampoline as

@@ -121,6 +121,15 @@ DEFINE_FLAG(bool,
             "distinguished from a same-owner or multiplicity problem by "
             "comparison rather than by guessing which field to add next.");
 
+DEFINE_FLAG(bool,
+            maot_dump_string_pool_entries,
+            false,
+            "DIAGNOSTIC. Dump every string-valued global object pool entry "
+            "with the SAME byte offset formula the cell offsets are printed "
+            "with, so a `ldr x2,[PP,#N]` standing next to a discarded call "
+            "result can be resolved to the literal it feeds instead of "
+            "inferred from position.");
+
 DEFINE_FLAG(int,
             maot_limit_selected,
             -1,
