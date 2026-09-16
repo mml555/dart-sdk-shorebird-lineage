@@ -3338,6 +3338,9 @@ static void MaotNoteSwitchableState(Thread* thread,
   const bool converges =
       !tramp.IsNull() && target.HasCode() &&
       target.CurrentCode() == tramp.ptr();
+  const intptr_t hit =
+      MaotRegistry::NoteSwitchableStateHit(state, converges);
+  if (!MaotRegistry::ShouldRecordSwitchableState(hit)) return;
   MaotRegistry::NoteDecision(
       thread, String::Handle(zone, MaotRegistry::DeclarationIdOf(thread,
                                                                 target)),

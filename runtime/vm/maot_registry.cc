@@ -2155,6 +2155,87 @@ MAOT_TEST_EXPORT int64_t Dart_MaotTrampolineIdentityForTesting(
   return fn.CurrentCode() == tramp.ptr() ? 1 : 2;
 }
 
+// MAOT-5 (#69). O(1) counters for switchable-state observations.
+//
+// The first version appended a decision record at every miss. A warm loop
+// that alternates receiver classes misses on most iterations, so the
+// decisions array grew without bound and the program stopped making progress
+// -- the instrument destroyed the thing it was measuring.
+//
+// Counters are unconditional and cheap; decision RECORDS are capped, because
+// a handful is all the evidence dump needs. The counter is what the
+// no-cache-mutation proof samples, so it must stay exact.
+static constexpr intptr_t kMaotSwitchableStates = 6;
+static constexpr intptr_t kMaotStateRecordCap = 8;
+static const char* const kMaotStateNames[kMaotSwitchableStates] = {
+    "instance-dispatch/UnlinkedCall-observed",
+    "instance-dispatch/monomorphic-observed",
+    "instance-dispatch/MonomorphicSmiableCall-observed",
+    "instance-dispatch/SingleTargetCache-observed",
+    "instance-dispatch/ICData-observed",
+    "instance-dispatch/MegamorphicCache-observed",
+};
+static RelaxedAtomic<intptr_t> g_maot_state_hits[kMaotSwitchableStates] = {
+    {0}, {0}, {0}, {0}, {0}, {0}};
+static RelaxedAtomic<intptr_t> g_maot_state_diverged[kMaotSwitchableStates] = {
+    {0}, {0}, {0}, {0}, {0}, {0}};
+
+intptr_t MaotRegistry::NoteSwitchableStateHit(const char* state,
+                                              bool converges) {
+  for (intptr_t i = 0; i < kMaotSwitchableStates; i++) {
+    if (strcmp(kMaotStateNames[i], state) != 0) continue;
+    if (!converges) g_maot_state_diverged[i].fetch_add(1);
+    return g_maot_state_hits[i].fetch_add(1) + 1;
+  }
+  return -1;
+}
+
+intptr_t MaotRegistry::SwitchableStateHits(const char* state) {
+  for (intptr_t i = 0; i < kMaotSwitchableStates; i++) {
+    if (strcmp(kMaotStateNames[i], state) == 0) {
+      return g_maot_state_hits[i].load();
+    }
+  }
+  return -1;
+}
+
+intptr_t MaotRegistry::SwitchableStateDivergences(const char* state) {
+  for (intptr_t i = 0; i < kMaotSwitchableStates; i++) {
+    if (strcmp(kMaotStateNames[i], state) == 0) {
+      return g_maot_state_diverged[i].load();
+    }
+  }
+  return -1;
+}
+
+bool MaotRegistry::ShouldRecordSwitchableState(intptr_t hit_number) {
+  return hit_number <= kMaotStateRecordCap;
+}
+
+// How many times a given switchable-call state has been RECORDED so far.
+//
+// This is the "no cache mutation" instrument. A cached dispatch target that
+// were invalidated by a replacement would miss again, and a miss records
+// another observation. So a diagnostic cell swap that changes what the call
+// returns WITHOUT increasing this count proves the cached target was never
+// touched and the state resolved through the cell.
+MAOT_TEST_EXPORT int64_t Dart_MaotObservedStateCount(const char* state) {
+  // No VM transition or handle scope: this reads a plain counter and must be
+  // cheap enough to call between individual calls in a warm loop.
+  // Reads the O(1) counter, not the decision array: the array is capped and
+  // would saturate, and this value is the no-cache-mutation instrument.
+  return MaotRegistry::SwitchableStateHits(state);
+}
+
+// How many observations of this state stored something OTHER than the
+// declaration trampoline. Non-zero is the failure the ruling names: a state
+// retaining executable body Code instead of the trampoline.
+MAOT_TEST_EXPORT int64_t Dart_MaotDivergedStateCount(const char* state) {
+  Thread* thread = Thread::Current();
+  if (thread == nullptr) return -10;
+  return MaotRegistry::SwitchableStateDivergences(state);
+}
+
 MAOT_TEST_EXPORT int64_t Dart_MaotCurrentVersionForTesting(const char* declaration_id) {
   Thread* thread = Thread::Current();
   if (thread == nullptr) return -10;
