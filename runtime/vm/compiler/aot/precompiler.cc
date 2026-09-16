@@ -1765,25 +1765,46 @@ void Precompiler::SeedMutableAotRoots() {
           "frozen executable target selects the current implementation",
           MaotRegistry::kSlotPreserving);
 
-      static const char* const kUnprovenStates[] = {
-          "instance-dispatch/UnlinkedCall",
-          "instance-dispatch/monomorphic",
-          "instance-dispatch/MonomorphicSmiableCall",
-          "instance-dispatch/SingleTargetCache",
-          "instance-dispatch/ICData",
-          "instance-dispatch/MegamorphicCache",
+      // PROVEN, and only for the exact combinations measured. The axis is
+      // (call form x switchable state), not state alone: UnlinkedCall proven
+      // under `dynamic` is not interface proven and is not all virtual forms
+      // proven. The interface form never enters this machinery at all -- it
+      // compiles to DispatchTableCallInstr, a direct indexed branch with no
+      // miss handler -- so it cannot inherit any of this.
+      static const char* const kProvenForms[] = {
+          "dynamic/UnlinkedCall-linked",
+          "dynamic/monomorphic",
       };
-      for (const char* state : kUnprovenStates) {
+      for (const char* form : kProvenForms) {
         MaotRegistry::NoteDecision(
-            T, decl, caller, state,
-            "this switchable-call state has not been shown to converge on "
-            "the declaration trampoline; #69 owes it separate mechanical "
-            "evidence",
+            T, decl, caller, form,
+            "one warmed call site in this state observed successive "
+            "implementation changes with the state's observation count "
+            "unchanged, and every observation recorded the stored executable "
+            "target as this declaration's trampoline",
+            MaotRegistry::kSlotPreserving);
+      }
+
+      // Everything else stays blocking. An unreached state is UNPROVEN, not
+      // safe: MonomorphicSmiableCall, SingleTargetCache and MegamorphicCache
+      // were never entered by any fixture, and not observed is not disproven.
+      static const char* const kUnprovenForms[] = {
+          "dynamic/MonomorphicSmiableCall",
+          "dynamic/SingleTargetCache",
+          "dynamic/ICData",
+          "dynamic/MegamorphicCache",
+          "interface/unproven",
+          "super/unproven",
+      };
+      for (const char* form : kUnprovenForms) {
+        MaotRegistry::NoteDecision(
+            T, decl, caller, form,
+            "this call form or switchable-call state has not been shown to "
+            "converge on the declaration trampoline; #69 owes it separate "
+            "mechanical evidence and it may not inherit another form's",
             MaotRegistry::kUnmodeledBlocking);
-        // No explicit NoteEscapeById here: NoteDecision already projects a
-        // blocking disposition into an escape. Calling both would count each
-        // unproven state twice and make the escape total meaningless as a
-        // count of what actually blocks.
+        // No explicit NoteEscapeById: NoteDecision already projects a
+        // blocking disposition into an escape. Both would double-count.
       }
     }
 

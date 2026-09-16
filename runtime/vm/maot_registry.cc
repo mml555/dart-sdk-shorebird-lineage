@@ -945,6 +945,59 @@ intptr_t MaotRegistry::CellPoolIndexForFunction(Thread* thread,
   return -1;
 }
 
+// The self-cycle invariant, enforced rather than remembered.
+//
+// A declaration's trampoline loads cell[kCellImplCode] and branches to it. If
+// that slot ever holds the trampoline itself, the branch returns to where it
+// came from and the process spins forever with no diagnostic -- which is
+// exactly what an accidental identity swap produced, and it had to be killed
+// at 900 seconds.
+//
+// Stage 2 already required the cell's Code half to be the implementation body
+// and never the trampoline. This makes that mechanical at the single point
+// both the production commit path and the diagnostic swap write the cell.
+// The exact records that currently block installation of this declaration,
+// as a comma-separated list of optimization classes.
+//
+// The refusal must be attributable to NAMED remaining blockers rather than to
+// an aggregate flag. A caller that is told only "escapes > 0" cannot tell
+// which dispatch form is still unproven, and cannot tell whether a form that
+// WAS proven is still being counted by mistake.
+void MaotRegistry::BlockingRecordsFor(Thread* thread,
+                                      const String& declaration_id,
+                                      BaseTextBuffer* out) {
+  Zone* zone = thread->zone();
+  const auto& decisions =
+      GrowableObjectArray::Handle(zone, EnsureDecisions(thread));
+  if (decisions.IsNull()) return;
+  auto& id = String::Handle(zone);
+  auto& cls = String::Handle(zone);
+  auto& disp = String::Handle(zone);
+  bool first = true;
+  for (intptr_t i = 0; i + kDecisionSlots <= decisions.Length();
+       i += kDecisionSlots) {
+    id ^= decisions.At(i);
+    if (id.IsNull() || !id.Equals(declaration_id)) continue;
+    disp ^= decisions.At(i + 4);
+    if (disp.IsNull() || !disp.Equals("UNMODELED_BLOCKING")) {
+      if (disp.IsNull() || !disp.Equals("FORBIDDEN")) continue;
+    }
+    cls ^= decisions.At(i + 2);
+    if (cls.IsNull()) continue;
+    if (!first) out->AddString(", ");
+    out->AddString(cls.ToCString());
+    first = false;
+  }
+}
+
+bool MaotRegistry::CellCodeWouldSelfCycle(Thread* thread,
+                                          intptr_t entry,
+                                          const Object& impl_code) {
+  if (impl_code.IsNull()) return false;
+  const CodePtr tramp = TrampolineAt(thread, entry);
+  return tramp != Code::null() && impl_code.ptr() == tramp;
+}
+
 void MaotRegistry::SetTrampolineFor(Thread* thread,
                                     intptr_t entry,
                                     const Code& trampoline) {
@@ -1264,11 +1317,18 @@ bool MaotRegistry::CommitStagedForTesting(Thread* thread,
     const auto& staged_fn_for_cell = Function::Handle(zone,
         staged_impl.IsNull() ? Function::null()
                              : Function::RawCast(staged_impl.ptr()));
+    const auto& next_code = Object::Handle(zone,
+        staged_fn_for_cell.IsNull() || !staged_fn_for_cell.HasCode()
+            ? Object::null()
+            : staged_fn_for_cell.CurrentCode());
+    if (CellCodeWouldSelfCycle(thread, entry, next_code)) {
+      // Refuse rather than install a cell that makes its own trampoline
+      // branch to itself. A replacement whose CurrentCode is a trampoline is
+      // not an implementation body.
+      return false;
+    }
     cell.SetAt(kCellImplFunction, staged_impl);
-    cell.SetAt(kCellImplCode,
-               staged_fn_for_cell.IsNull() || !staged_fn_for_cell.HasCode()
-                   ? Object::null_object()
-                   : Object::Handle(zone, staged_fn_for_cell.CurrentCode()));
+    cell.SetAt(kCellImplCode, next_code);
   }
   SetFieldAt(thread, entry, kCurrentAbi,
              Object::Handle(zone, FieldAt(thread, entry, kStagedAbi)));
@@ -1912,6 +1972,17 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
       writer.PrintProperty("first_escape_reason",
                            why.IsNull() ? "<none>" : why.ToCString());
       writer.PrintPropertyBool("installable", n == 0);
+      // Which records are doing the blocking, by name. A bare escape count
+      // cannot say whether a form that was proven is still being counted.
+      {
+        const auto& decl = String::Handle(zone,
+            String::RawCast(FieldAt(thread, i, kDeclarationId)));
+        char buf[1024];
+        BufferFormatter bf(buf, sizeof(buf));
+        BlockingRecordsFor(thread, decl, &bf);
+        writer.PrintProperty("blocking_records",
+                             buf[0] == '\0' ? "<none>" : buf);
+      }
     }
     writer.PrintProperty64(
         "indirect_call_sites_emitted",
@@ -2123,9 +2194,14 @@ MAOT_TEST_EXPORT int64_t Dart_MaotDiagnosticCellSwap(
   const auto& impl_fn = Function::Handle(
       zone, MaotRegistry::CurrentImplAt(thread, impl_entry));
   if (impl_fn.IsNull() || !impl_fn.HasCode()) return -4;
+  const auto& next_code = Code::Handle(zone, impl_fn.CurrentCode());
+  if (MaotRegistry::CellCodeWouldSelfCycle(thread, entry, next_code)) {
+    // -5: the replacement's CurrentCode is this declaration's own trampoline,
+    // so the cell would make the trampoline branch to itself.
+    return -5;
+  }
   cell.SetAt(MaotRegistry::kCellImplFunction, impl_fn);
-  cell.SetAt(MaotRegistry::kCellImplCode,
-             Code::Handle(zone, impl_fn.CurrentCode()));
+  cell.SetAt(MaotRegistry::kCellImplCode, next_code);
   return 0;
 }
 
