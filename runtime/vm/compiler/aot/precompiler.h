@@ -333,6 +333,7 @@ class Precompiler : public ValueObject {
   CodePtr GenerateMaotTrampoline(const Array& cell, const Function& owner);
   void InstallMaotTrampolines();
   void VerifyMaotDispatchTableTargets();
+  void DumpMaotCallerCode(const char* stage);
   void DumpMaotTrampolineShapes();
   void RepinMutableAotImplementations();
   void AddInstantiatedClass(const Class& cls);
