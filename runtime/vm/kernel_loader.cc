@@ -1843,7 +1843,8 @@ void KernelLoader::BindMaotDeclaration(intptr_t kernel_node_offset,
   // never escape. It is an interim posture, not the repair: a false refusal
   // is acceptable, an install that reports success while every caller keeps
   // the release value is not.
-  if (md.selected && md.constant_return) {
+  if (md.selected && md.constant_return &&
+      !FLAG_maot_disable_constant_escape_block) {
     MaotRegistry::NoteDecision(
         thread_, id, id, "constant-folding/transitive-escape-risk",
         "this declaration's own summary result is constant, so the constant "
