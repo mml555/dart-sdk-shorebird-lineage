@@ -876,28 +876,38 @@ void Precompiler::DoCompileAll() {
   // "what the lowering intended" and "what will actually execute" can differ,
   // and the super result says they do.
   if (FLAG_maot_dump_caller_code != nullptr) {
+    // Walk the program the standard way. An earlier version iterated
+    // functions_to_retain_ directly and segfaulted gen_snapshot: that set is
+    // not a safe iteration target at this point in the pipeline.
+    class CallerCodeDumper : public FunctionVisitor {
+     public:
+      CallerCodeDumper(Zone* zone, FILE* out)
+          : zone_(zone), out_(out), code_(Code::Handle(zone)) {}
+      void VisitFunction(const Function& function) override {
+        if (function.IsNull() || !function.HasCode()) return;
+        const char* name = function.ToFullyQualifiedCString();
+        if (strstr(name, FLAG_maot_dump_caller_code) == nullptr) return;
+        code_ = function.CurrentCode();
+        const uword start = code_.PayloadStart();
+        const intptr_t size = code_.Size();
+        fprintf(out_, "[caller] %s size=%" Pd "\n", name, size);
+        fprintf(out_, "[words]");
+        for (intptr_t off = 0; off + 4 <= size; off += 4) {
+          fprintf(out_, " %08x", *reinterpret_cast<uint32_t*>(start + off));
+        }
+        fprintf(out_, "\n");
+        fflush(out_);
+      }
+
+     private:
+      Zone* zone_;
+      FILE* out_;
+      Code& code_;
+    };
     FILE* out = fopen("/tmp/maot_caller_code.txt", "w");
     if (out != nullptr) {
-      auto& fn = Function::Handle(Z);
-      auto& code = Code::Handle(Z);
-      // Walk retained functions directly from the precompiler's own set.
-      FunctionSet::Iterator it(&functions_to_retain_);
-      while (it.MoveNext()) {
-        fn ^= functions_to_retain_.GetKey(it.Current());
-        if (fn.IsNull() || !fn.HasCode()) continue;
-        const char* name = fn.ToFullyQualifiedCString();
-        if (strstr(name, FLAG_maot_dump_caller_code) == nullptr) continue;
-        code = fn.CurrentCode();
-        const uword start = code.PayloadStart();
-        const intptr_t size = code.Size();
-        fprintf(out, "[caller] %s size=%" Pd "\n", name, size);
-        fprintf(out, "[words]");
-        for (intptr_t off = 0; off + 4 <= size; off += 4) {
-          fprintf(out, " %08x", *reinterpret_cast<uint32_t*>(start + off));
-        }
-        fprintf(out, "\n");
-      }
-      fflush(out);
+      CallerCodeDumper dumper(Z, out);
+      ProgramVisitor::WalkProgram(Z, IG, &dumper);
       fclose(out);
     }
   }
