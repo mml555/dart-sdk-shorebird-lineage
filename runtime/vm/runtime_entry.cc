@@ -2825,6 +2825,26 @@ void PatchableCallHandler::DoUnlinkedCallAOT(const UnlinkedCall& unlinked,
     MaotRegistry::NoteUnlinkedTransition(
         unlinked.can_patch_to_monomorphic(),
         static_cast<intptr_t>(object.GetClassId()));
+    // Name the resulting state object rather than leaving a bare cid for a
+    // reader to decode against a macro-built enum. Capped like the other
+    // switchable records.
+    const intptr_t hit = MaotRegistry::NoteSwitchableStateHit(
+        "instance-dispatch/UnlinkedCall-observed", true);
+    if (MaotRegistry::ShouldRecordSwitchableState(hit)) {
+      char buf[256];
+      Utils::SNPrint(buf, sizeof(buf),
+                     "UnlinkedCall transition: can_patch_to_monomorphic=%d, "
+                     "installed state object = %s",
+                     unlinked.can_patch_to_monomorphic() ? 1 : 0,
+                     object.ToCString());
+      MaotRegistry::NoteDecision(
+          thread_,
+          String::Handle(zone_, MaotRegistry::DeclarationIdOf(thread_,
+                                                              target_function)),
+          String::Handle(zone_, String::New("<runtime-dispatch>", Heap::kOld)),
+          "instance-dispatch/UnlinkedCall-transition", buf,
+          MaotRegistry::kSlotPreserving);
+    }
   }
   CodePatcher::PatchSwitchableCallAt(caller_frame_->pc(), caller_code_, object,
                                      code);
