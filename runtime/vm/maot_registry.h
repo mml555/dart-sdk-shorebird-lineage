@@ -307,6 +307,12 @@ class MaotRegistry : public AllStatic {
   static ArrayPtr DispatchCellAt(Thread* thread, intptr_t entry);
   static CodePtr CellImplCodeAt(Thread* thread, intptr_t entry);
   static StringPtr DeclarationIdAt(Thread* thread, intptr_t entry);
+  // Records what DoUnlinkedCallAOT actually installed: the flag as read and
+  // the class id of the resulting state object.
+  static void NoteUnlinkedTransition(bool can_patch_to_monomorphic,
+                                     intptr_t resulting_cid);
+  static intptr_t UnlinkedTransitionCount(bool can_patch_to_monomorphic,
+                                          intptr_t resulting_cid);
   static intptr_t NoteSwitchableStateHit(const char* state, bool converges);
   static intptr_t SwitchableStateHits(const char* state);
   static intptr_t SwitchableStateDivergences(const char* state);

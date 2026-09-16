@@ -2814,6 +2814,18 @@ void PatchableCallHandler::DoUnlinkedCallAOT(const UnlinkedCall& unlinked,
       code = StubCode::MonomorphicSmiableCheck().ptr();
     }
   }
+  // GROUND TRUTH for the can_patch_to_monomorphic question. Record the flag
+  // as read, and the class id of the object actually installed, so the
+  // transition is observed rather than inferred:
+  //   kSmiCid                     -> plain monomorphic (flag true)
+  //   kMonomorphicSmiableCallCid  -> MonomorphicSmiableCall (flag false)
+  //   kICDataCid                  -> straight to the IC stub (no target, or
+  //                                  the target needs an args descriptor)
+  if (MaotRegistry::IsMutableDeclaration(thread_, target_function)) {
+    MaotRegistry::NoteUnlinkedTransition(
+        unlinked.can_patch_to_monomorphic(),
+        static_cast<intptr_t>(object.GetClassId()));
+  }
   CodePatcher::PatchSwitchableCallAt(caller_frame_->pc(), caller_code_, object,
                                      code);
 
@@ -3367,11 +3379,13 @@ void PatchableCallHandler::HandleMissAOT(const Object& old_data,
       // one this configuration produces is a reachability fact, and
       // UnlinkedCall::New's default (!FLAG_precompiled_mode) disagrees with
       // what was observed -- so it is recorded rather than reasoned about.
-      MaotNoteSwitchableState(
-          thread_, target_function,
-          UnlinkedCall::Cast(old_data).can_patch_to_monomorphic()
-              ? "instance-dispatch/UnlinkedCall-observed"
-              : "instance-dispatch/MonomorphicSmiableCall-observed");
+      // Always the UnlinkedCall label here: this is the state we are IN, not
+      // the one we are going to. Labelling by can_patch_to_monomorphic
+      // ASSUMED which branch DoUnlinkedCallAOT would take, which is the
+      // assumption under suspicion. The branch actually taken is recorded
+      // inside DoUnlinkedCallAOT, from the object it really installs.
+      MaotNoteSwitchableState(thread_, target_function,
+                              "instance-dispatch/UnlinkedCall-observed");
       DoUnlinkedCallAOT(UnlinkedCall::Cast(old_data), target_function);
       break;
     case kMonomorphicSmiableCallCid:

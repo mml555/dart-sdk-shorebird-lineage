@@ -2256,6 +2256,44 @@ static RelaxedAtomic<intptr_t> g_maot_state_hits[kMaotSwitchableStates] = {
 static RelaxedAtomic<intptr_t> g_maot_state_diverged[kMaotSwitchableStates] = {
     {0}, {0}, {0}, {0}, {0}, {0}};
 
+// (flag, resulting cid) pairs seen at UnlinkedCall transitions. Small fixed
+// table; the question is which combinations occur at all, not how often.
+static constexpr intptr_t kMaotUnlinkedPairs = 8;
+static RelaxedAtomic<intptr_t> g_maot_unlinked_flag[kMaotUnlinkedPairs] = {
+    {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}};
+static RelaxedAtomic<intptr_t> g_maot_unlinked_cid[kMaotUnlinkedPairs] = {
+    {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}};
+static RelaxedAtomic<intptr_t> g_maot_unlinked_n[kMaotUnlinkedPairs] = {
+    {0}, {0}, {0}, {0}, {0}, {0}, {0}, {0}};
+
+void MaotRegistry::NoteUnlinkedTransition(bool can_patch, intptr_t cid) {
+  const intptr_t flag = can_patch ? 1 : 0;
+  for (intptr_t i = 0; i < kMaotUnlinkedPairs; i++) {
+    if (g_maot_unlinked_flag[i].load() == flag &&
+        g_maot_unlinked_cid[i].load() == cid) {
+      g_maot_unlinked_n[i].fetch_add(1);
+      return;
+    }
+    if (g_maot_unlinked_flag[i].load() == -1) {
+      g_maot_unlinked_flag[i].store(flag);
+      g_maot_unlinked_cid[i].store(cid);
+      g_maot_unlinked_n[i].store(1);
+      return;
+    }
+  }
+}
+
+intptr_t MaotRegistry::UnlinkedTransitionCount(bool can_patch, intptr_t cid) {
+  const intptr_t flag = can_patch ? 1 : 0;
+  for (intptr_t i = 0; i < kMaotUnlinkedPairs; i++) {
+    if (g_maot_unlinked_flag[i].load() == flag &&
+        g_maot_unlinked_cid[i].load() == cid) {
+      return g_maot_unlinked_n[i].load();
+    }
+  }
+  return 0;
+}
+
 intptr_t MaotRegistry::NoteSwitchableStateHit(const char* state,
                                               bool converges) {
   for (intptr_t i = 0; i < kMaotSwitchableStates; i++) {
@@ -2306,6 +2344,14 @@ MAOT_TEST_EXPORT int64_t Dart_MaotObservedStateCount(const char* state) {
 // How many observations of this state stored something OTHER than the
 // declaration trampoline. Non-zero is the failure the ruling names: a state
 // retaining executable body Code instead of the trampoline.
+// (can_patch_to_monomorphic, resulting state cid) -> times observed.
+// Encoded as flag*1000000 + cid so one integer carries the pair.
+MAOT_TEST_EXPORT int64_t Dart_MaotUnlinkedTransition(int64_t flag,
+                                                     int64_t cid) {
+  return MaotRegistry::UnlinkedTransitionCount(
+      flag != 0, static_cast<intptr_t>(cid));
+}
+
 MAOT_TEST_EXPORT int64_t Dart_MaotDivergedStateCount(const char* state) {
   Thread* thread = Thread::Current();
   if (thread == nullptr) return -10;

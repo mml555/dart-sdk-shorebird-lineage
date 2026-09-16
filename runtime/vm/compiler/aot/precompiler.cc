@@ -1778,6 +1778,11 @@ void Precompiler::SeedMutableAotRoots() {
           // through that same site: counts 1/1/1/1, and the other cid entry
           // in the same inline cache stayed on its own declaration.
           "dynamic/ICData",
+          // The interface form never enters the switchable-call machinery at
+          // all: across three swaps the site showed no state transition. It
+          // is the dispatch table and nothing else, which is the concrete
+          // mechanism -- not a conversion of the old placeholder.
+          "interface/dispatch-table",
       };
       for (const char* form : kProvenForms) {
         MaotRegistry::NoteDecision(
@@ -1796,7 +1801,6 @@ void Precompiler::SeedMutableAotRoots() {
           "dynamic/MonomorphicSmiableCall",
           "dynamic/SingleTargetCache",
           "dynamic/MegamorphicCache",
-          "interface/unproven",
           "super/unproven",
       };
       for (const char* form : kUnprovenForms) {
