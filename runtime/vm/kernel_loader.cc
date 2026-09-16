@@ -1824,6 +1824,34 @@ void KernelLoader::BindMaotDeclaration(intptr_t kernel_node_offset,
                               Symbols::Empty())) {
     FATAL("MaotRegistry: duplicate declaration id '%s'", id.ToCString());
   }
+  // MUTABLE-AOT (#68, interim fail-closed posture).
+  //
+  // The direct-edge suppression blanks the constant on a call whose target is
+  // this declaration -- and by blanking it, removes the very evidence the
+  // backstop in BuildStaticInvocation keys on. Meanwhile the constant has
+  // already propagated through the analysis into the summary of any
+  // non-mutable function that returns this declaration's value, so callers of
+  // THAT function fold the release answer at a call site neither layer
+  // inspects. Measured: install reported success, the cell held the
+  // replacement, the caller still returned the release constant.
+  //
+  // Recorded here, at the one point where the declaration and its Kernel
+  // metadata coexist, rather than re-derived later from a call site that by
+  // construction no longer carries the constant.
+  //
+  // This is deliberately coarse -- it blocks a declaration whose constant may
+  // never escape. It is an interim posture, not the repair: a false refusal
+  // is acceptable, an install that reports success while every caller keeps
+  // the release value is not.
+  if (md.selected && md.constant_return) {
+    MaotRegistry::NoteDecision(
+        thread_, id, id, "constant-folding/transitive-escape-risk",
+        "this declaration's own summary result is constant, so the constant "
+        "can propagate into a non-mutable intermediary's summary and be "
+        "folded at callers that neither the front-end suppression nor the "
+        "backstop examines",
+        MaotRegistry::kForbidden);
+  }
 }
 
 void KernelLoader::LoadProcedure(const Library& library,

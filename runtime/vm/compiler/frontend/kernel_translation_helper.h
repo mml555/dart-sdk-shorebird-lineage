@@ -1125,6 +1125,12 @@ struct MaotDeclarationIdMetadata {
   StringIndex declaration_id;
   StringIndex abi_canonical;
   bool selected = false;
+  // The declaration's own analysis summary produces a constant result, which
+  // is the precondition for that constant escaping into a non-mutable
+  // intermediary's summary and being folded at callers the direct-edge
+  // suppression never examines. See MaotDeclarationIdMetadata.constantReturn
+  // in pkg/vm/lib/metadata/maot_declaration_id.dart.
+  bool constant_return = false;
   bool has_value = false;
 };
 

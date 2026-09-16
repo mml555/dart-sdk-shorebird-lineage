@@ -1978,6 +1978,7 @@ bool MaotDeclarationIdMetadataHelper::ReadMetadata(
   metadata->declaration_id = helper_->ReadStringReference();
   metadata->selected = helper_->ReadByte() == 1;
   metadata->abi_canonical = helper_->ReadStringReference();
+  metadata->constant_return = helper_->ReadByte() == 1;
   metadata->has_value = true;
   return true;
 }

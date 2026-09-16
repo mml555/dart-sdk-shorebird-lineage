@@ -166,15 +166,35 @@ class MaotDeclarationIdMetadata {
 
   final MaotAbiDescriptor abi;
 
+  /// Whether this declaration's own analysis summary carries a constant
+  /// result (MUTABLE-AOT #68, interim fail-closed posture).
+  ///
+  /// This is the precondition for the transitive constant-propagation hole. A
+  /// mutable declaration whose summary result is constant can have that
+  /// constant escape into the summary of a NON-mutable function that returns
+  /// its value, and every caller of that function then folds the release
+  /// answer legitimately -- the direct-edge suppression never sees that call,
+  /// because the call's target is the intermediary, not the mutable
+  /// declaration.
+  ///
+  /// Suppressing the constant at the direct call site ALSO removes the
+  /// evidence the VM's backstop keys on, so the escape is silent: the install
+  /// succeeds, the cell holds the replacement, and the caller still returns
+  /// the release constant. Carrying the fact per declaration is what lets the
+  /// install path refuse instead of reporting success.
+  final bool constantReturn;
+
   const MaotDeclarationIdMetadata({
     required this.declarationId,
     required this.selected,
     required this.abi,
+    this.constantReturn = false,
   });
 
   @override
   String toString() =>
-      '$declarationId${selected ? " [selected]" : ""} ${abi.canonicalForm}';
+      '$declarationId${selected ? " [selected]" : ""}'
+      '${constantReturn ? " [constant-return]" : ""} ${abi.canonicalForm}';
 }
 
 class MaotDeclarationIdMetadataRepository
@@ -217,6 +237,7 @@ class MaotDeclarationIdMetadataRepository
     sink.writeStringReference(metadata.declarationId);
     sink.writeByte(metadata.selected ? 1 : 0);
     sink.writeStringReference(metadata.abi.canonicalForm);
+    sink.writeByte(metadata.constantReturn ? 1 : 0);
   }
 
   @override
@@ -224,10 +245,12 @@ class MaotDeclarationIdMetadataRepository
     final declarationId = source.readStringReference();
     final selected = source.readByte() == 1;
     final canonical = source.readStringReference();
+    final constantReturn = source.readByte() == 1;
     return MaotDeclarationIdMetadata(
       declarationId: declarationId,
       selected: selected,
       abi: MaotAbiDescriptor.parse(canonical),
+      constantReturn: constantReturn,
     );
   }
 
@@ -282,10 +305,14 @@ class MaotDeclarationIdMetadataRepository
     }
   }
 
+  /// [constantReturning] answers, for a member, whether its own analysis
+  /// summary result is constant. Passed as a callback so this library keeps
+  /// no dependency on the type-flow internals that can answer it.
   void index(
     Component component,
     MaotIdentity identity, {
     required Set<String> selectedIds,
+    bool Function(Member)? constantReturning,
     bool includeSdk = false,
   }) {
     for (final library in component.libraries) {
@@ -303,10 +330,15 @@ class MaotDeclarationIdMetadataRepository
           // defined role. It has an id, and nothing may bind to it.
           return;
         }
+        final isSelected = selectedIds.contains(id.id);
         mapping[member] = MaotDeclarationIdMetadata(
           declarationId: id.id,
-          selected: selectedIds.contains(id.id),
+          selected: isSelected,
           abi: describeAbi(member, id, identity),
+          // Only asked for selected declarations: an unselected one cannot be
+          // installed over, so its constant cannot produce a false success.
+          constantReturn:
+              isSelected && (constantReturning?.call(member) ?? false),
         );
       }
 
