@@ -106,19 +106,24 @@ Library? maotEnclosingLibraryOrNull(Member member) {
   return node is Library ? node : null;
 }
 
-/// P1 PROTOTYPE (#68), off by default.
+/// P1 (#68), ON by default: the production fix for the transitive
+/// constant-propagation defect.
 ///
 /// Clears the constant attribute on the result a mutable declaration's
 /// summary produces, so the constant never enters any caller's summary. This
-/// attacks the transitive-escape defect where it originates, rather than
-/// refusing the install afterwards as the P3 posture does.
+/// attacks the escape where it originates rather than refusing the install
+/// afterwards, which is what the P3 posture did.
 ///
-/// Behind an environment switch because its blast radius is unmeasured: under
-/// MAOT_SELECT_ALL_NON_SDK every non-SDK declaration is selected, and
-/// suppressing constants across that population is a different proposition
-/// from suppressing them for a handful of annotated functions.
+/// Measured at the deliberately broad MAOT_SELECT_ALL_NON_SDK upper bound:
+/// +0.43% AOT, 444 of 26,590 selected declarations had a constant cleared,
+/// and 52 downstream summaries changed out of 10,163.
+///
+/// Set MAOT_P1_CLEAR_MUTABLE_CONSTANTS=0 to turn it off. That is not a tuning
+/// knob -- it is how the falsification arms inject the defect this exists to
+/// prevent, and how the P3 fallback would be reached if P1 ever had to be
+/// switched off.
 final bool maotP1ClearMutableConstants =
-    Platform.environment['MAOT_P1_CLEAR_MUTABLE_CONSTANTS'] == '1';
+    Platform.environment['MAOT_P1_CLEAR_MUTABLE_CONSTANTS'] != '0';
 
 /// Where the P1 prototype writes what it did, for the blast-radius lane.
 final String maotP1TracePath =
