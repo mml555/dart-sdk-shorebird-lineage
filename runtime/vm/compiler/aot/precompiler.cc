@@ -2058,12 +2058,22 @@ void Precompiler::VerifyMaotDispatchTableTargets() {
       }
       if (occurrences > worst) worst = occurrences;
       id = MaotRegistry::DeclarationIdAt(T, i);
+      // Print the seeded index AND the byte offset the assembler encodes
+      // from it, so a dumped `ldr x0,[PP,#N]` can be matched against the
+      // declaration it is supposed to name without guessing the formula.
+      const intptr_t pool_index = MaotRegistry::CellPoolIndexAt(T, i);
       OS::PrintErr("[maot] pool entries for the cell of %s: %" Pd
-                   " (static call sites %" Pd ")\n",
+                   " (static call sites %" Pd ", seeded index %" Pd
+                   ", PP offset %" Pd ")\n",
                    id.IsNull() ? "<null>" : id.ToCString(), occurrences,
                    MaotRegistry::CallSiteCountFor(
                        T, Function::Handle(
-                              Z, MaotRegistry::CurrentImplAt(T, i))));
+                              Z, MaotRegistry::CurrentImplAt(T, i))),
+                   pool_index,
+                   pool_index < 0 ? static_cast<intptr_t>(-1)
+                                  : static_cast<intptr_t>(
+                                        compiler::target::ObjectPool::
+                                            element_offset(pool_index)));
     }
     OS::PrintErr("[maot] MAX pool entries for any one cell: %" Pd "%s\n",
                  worst, worst > 1 ? "  <-- DUPLICATED" : "");
