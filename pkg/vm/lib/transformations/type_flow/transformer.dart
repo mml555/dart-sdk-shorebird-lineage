@@ -5,7 +5,7 @@
 /// Transformations based on type flow analysis.
 library;
 
-import 'dart:io' show File, Platform;
+import 'dart:io' show File, FileMode, Platform;
 
 import 'dart:core' hide Type;
 
@@ -280,15 +280,33 @@ Component transformComponent(
   // inferred constant changes" is not something one run can know; it is the
   // difference between two.
   if (maotP1TracePath.isNotEmpty) {
+    // APPENDED, one record per compilation, because a single output path is
+    // overwritten by every gen_kernel invocation a multi-lane run makes. The
+    // first version truncated, and the two lanes being compared turned out to
+    // be different lanes -- the "P1 on" trace was the control lane, where
+    // nothing is selected and so nothing can be cleared. A zero that means
+    // "wrong lane" is indistinguishable from a zero that means "no effect".
     final out = StringBuffer();
+    out.writeln('--- record');
     out.writeln('selected ${maotSelectedIds.length}');
     out.writeln('p1_enabled ${maotP1ClearMutableConstants ? 1 : 0}');
     out.writeln('cleared_applications $maotP1ConstantsCleared');
     out.writeln('cleared_declarations ${maotP1ClearedMembers.length}');
+    // FAIL-OPEN SURFACE for the P3 posture. index() runs after TreeShaker and
+    // SignatureShaker, which replace member nodes, while the analysis keyed
+    // its summaries on the members that existed before them. A selected
+    // declaration whose summary cannot be found is one the constant-return
+    // test silently answers "no" for -- which is the wrong direction to be
+    // wrong in. Counted so the size of that gap is a number rather than an
+    // argument.
+    int selectedWithoutSummary = 0;
     for (final library in component.libraries) {
       void visit(Member member) {
         if (member is! Procedure || member.isSetter) return;
-        if (!typeFlowAnalysis.isMemberUsed(member)) return;
+        if (!typeFlowAnalysis.isMemberUsed(member)) {
+          if (isMaotSelected(member)) selectedWithoutSummary++;
+          return;
+        }
         final isConst = _maotSummaryResultIsConstant(typeFlowAnalysis, member);
         out.writeln('const ${isConst ? 1 : 0} '
             '${library.importUri}::${member.enclosingClass?.name ?? ""}'
@@ -299,7 +317,9 @@ Component transformComponent(
         cls.members.forEach(visit);
       }
     }
-    File(maotP1TracePath).writeAsStringSync(out.toString());
+    out.writeln('selected_without_summary $selectedWithoutSummary');
+    File(maotP1TracePath)
+        .writeAsStringSync(out.toString(), mode: FileMode.append);
   }
 
   new AnnotateKernel(
