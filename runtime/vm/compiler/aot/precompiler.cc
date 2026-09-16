@@ -1774,6 +1774,10 @@ void Precompiler::SeedMutableAotRoots() {
       static const char* const kProvenForms[] = {
           "dynamic/UnlinkedCall-linked",
           "dynamic/monomorphic",
+          // Reached naturally by driving one site polymorphically, then read
+          // through that same site: counts 1/1/1/1, and the other cid entry
+          // in the same inline cache stayed on its own declaration.
+          "dynamic/ICData",
       };
       for (const char* form : kProvenForms) {
         MaotRegistry::NoteDecision(
@@ -1791,7 +1795,6 @@ void Precompiler::SeedMutableAotRoots() {
       static const char* const kUnprovenForms[] = {
           "dynamic/MonomorphicSmiableCall",
           "dynamic/SingleTargetCache",
-          "dynamic/ICData",
           "dynamic/MegamorphicCache",
           "interface/unproven",
           "super/unproven",
