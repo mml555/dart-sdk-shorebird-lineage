@@ -2378,6 +2378,18 @@ MAOT_TEST_EXPORT int64_t Dart_MaotObservedStateCount(const char* state) {
 // retaining executable body Code instead of the trampoline.
 // (can_patch_to_monomorphic, resulting state cid) -> times observed.
 // Encoded as flag*1000000 + cid so one integer carries the pair.
+uword MaotRegistry::DeclarationTrampolineEntry(Thread* thread,
+                                               const Function& function) {
+  if (function.IsNull()) return 0;
+  Zone* zone = thread->zone();
+  const auto& id = String::Handle(zone, DeclarationIdOf(thread, function));
+  if (id.IsNull()) return 0;
+  const intptr_t entry = IndexOf(thread, id);
+  if (entry < 0) return 0;
+  const auto& tramp = Code::Handle(zone, TrampolineAt(thread, entry));
+  return tramp.IsNull() ? 0 : tramp.EntryPoint();
+}
+
 MAOT_TEST_EXPORT int64_t Dart_MaotUnlinkedTransition(int64_t flag,
                                                      int64_t cid) {
   return MaotRegistry::UnlinkedTransitionCount(

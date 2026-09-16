@@ -2379,6 +2379,13 @@ class MonomorphicSmiableCall : public Object {
  public:
   classid_t expected_cid() const { return untag()->expected_cid_; }
 
+  // The stored executable target, as a RAW ADDRESS frozen when this object
+  // was installed. Unlike ICData this class holds no Code pointer at all
+  // (VISIT_NOTHING), so nothing updates this word when a target's code
+  // changes -- which is exactly what Mutable-AOT (#69) has to examine for
+  // this switchable-call state.
+  uword entrypoint() const { return untag()->entrypoint_; }
+
   static intptr_t InstanceSize() {
     return RoundedAllocationSize(sizeof(UntaggedMonomorphicSmiableCall));
   }
