@@ -5,7 +5,7 @@
 /// Transformations based on type flow analysis.
 library;
 
-import 'dart:io' show Platform;
+import 'dart:io' show File, Platform;
 
 import 'dart:core' hide Type;
 
@@ -43,6 +43,7 @@ import 'rta.dart' show RapidTypeAnalysis;
 import 'signature_shaking.dart';
 import 'summary.dart';
 import 'table_selector_assigner.dart';
+import 'maot_selection.dart';
 import 'types.dart';
 import 'unboxing_info.dart';
 import 'utils.dart';
@@ -53,32 +54,6 @@ const bool kDumpClassHierarchy = const bool.fromEnvironment(
 
 /// Whole-program type flow analysis and transformation.
 /// Assumes strong mode and closed world.
-/// Mutable-AOT selection (#66): a declaration is mutable when the developer
-/// says so with `@pragma('maot:mutable')`.
-///
-/// Explicit on purpose. An implicit rule -- "everything public", "everything
-/// reachable" -- would make the mutable set a consequence of unrelated edits,
-/// and #66 requires that an unselected declaration can never become mutable by
-/// accident nor a selected one silently vanish.
-bool _isMaotMutable(Member member) {
-  for (final annotation in member.annotations) {
-    if (annotation is ConstantExpression) {
-      final constant = annotation.constant;
-      if (constant is InstanceConstant) {
-        final name = constant.classNode.name;
-        if (name == 'pragma') {
-          for (final entry in constant.fieldValues.entries) {
-            final value = entry.value;
-            if (value is StringConstant && value.value == 'maot:mutable') {
-              return true;
-            }
-          }
-        }
-      }
-    }
-  }
-  return false;
-}
 
 
 /// Whether [member]'s own analysis summary produces a constant result
@@ -115,40 +90,8 @@ bool _maotSummaryResultIsConstant(TypeFlowAnalysis tfa, Member member) {
   return result is ConcreteType && result.attributes?.constant != null;
 }
 
-/// MEASUREMENT ONLY (#68 performance accounting), read once from the
-/// environment. An environment variable rather than a VM flag because this
-/// code runs inside gen_kernel, which does not take VM flags.
-final bool _maotSelectAllNonSdk =
-    Platform.environment['MAOT_SELECT_ALL_NON_SDK'] == '1';
 
-/// Restricts the scale lane to libraries whose import URI starts with this,
-/// so the realistic posture -- an app author marking their OWN declarations
-/// mutable -- can be measured next to the upper bound of marking everything.
-/// Empty means no restriction.
-final String _maotSelectUriPrefix =
-    Platform.environment['MAOT_SELECT_URI_PREFIX'] ?? '';
 
-/// The scale lane's selection predicate: the same population the pragma path
-/// can reach, minus what the registry would skip anyway. An abstract or
-/// external member has no AOT body to replace, so counting it would inflate
-/// the measurement with declarations the posture never touches.
-bool _isMaotSelectableAtScale(Member member) {
-  if (_maotSelectUriPrefix.isNotEmpty &&
-      !member.enclosingLibrary.importUri
-          .toString()
-          .startsWith(_maotSelectUriPrefix)) {
-    return false;
-  }
-  if (member is Procedure) {
-    return !member.isAbstract &&
-        !member.isExternal &&
-        member.function.body != null;
-  }
-  if (member is Constructor) {
-    return !member.isExternal;
-  }
-  return false;
-}
 
 Component transformComponent(
   Target target,
@@ -270,7 +213,7 @@ Component transformComponent(
   final maotSelectedIds = MaotDeclarationIdMetadataRepository.collectSelected(
     component,
     maotIdentity,
-    _maotSelectAllNonSdk ? _isMaotSelectableAtScale : _isMaotMutable,
+    maotSelectAllNonSdk ? isMaotSelectableAtScale : isMaotMutable,
   );
 
   final (:fieldMorpher, treeShakeConstant: treeShakeConstant) = new TreeShaker(
@@ -329,6 +272,34 @@ Component transformComponent(
       // ignore: avoid_print
       print('[maot-dart]   ${e.value.declarationId} selected=${e.value.selected}');
     }
+  }
+
+  // MUTABLE-AOT (#68) BLAST-RADIUS LANE. Writes what the P1 prototype did and
+  // what every member's summary result looks like, so two runs -- P1 off and
+  // P1 on -- can be DIFFED rather than described. "Downstream summaries whose
+  // inferred constant changes" is not something one run can know; it is the
+  // difference between two.
+  if (maotP1TracePath.isNotEmpty) {
+    final out = StringBuffer();
+    out.writeln('selected ${maotSelectedIds.length}');
+    out.writeln('p1_enabled ${maotP1ClearMutableConstants ? 1 : 0}');
+    out.writeln('cleared_applications $maotP1ConstantsCleared');
+    out.writeln('cleared_declarations ${maotP1ClearedMembers.length}');
+    for (final library in component.libraries) {
+      void visit(Member member) {
+        if (member is! Procedure || member.isSetter) return;
+        if (!typeFlowAnalysis.isMemberUsed(member)) return;
+        final isConst = _maotSummaryResultIsConstant(typeFlowAnalysis, member);
+        out.writeln('const ${isConst ? 1 : 0} '
+            '${library.importUri}::${member.enclosingClass?.name ?? ""}'
+            '::${member.name.text}');
+      }
+      library.members.forEach(visit);
+      for (final cls in library.classes) {
+        cls.members.forEach(visit);
+      }
+    }
+    File(maotP1TracePath).writeAsStringSync(out.toString());
   }
 
   new AnnotateKernel(
@@ -785,7 +756,7 @@ final bool _maotAllowConstantFolding =
     final Member? target = node is StaticInvocation
         ? node.target
         : (node is ConstructorInvocation ? node.target : interfaceTarget);
-    return target != null && _isMaotMutable(target);
+    return target != null && isMaotMutable(target);
   }
 
   void _annotateCallSite(TreeNode node, Member? interfaceTarget) {

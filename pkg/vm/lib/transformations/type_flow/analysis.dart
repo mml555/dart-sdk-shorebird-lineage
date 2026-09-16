@@ -17,6 +17,7 @@ import 'package:kernel/core_types.dart' show CoreTypes;
 import 'package:kernel/type_environment.dart';
 import 'package:vm/transformations/pragma.dart';
 
+import 'maot_selection.dart';
 import 'calls.dart';
 import 'config.dart';
 import 'native_code.dart';
@@ -265,6 +266,52 @@ abstract base class _Invocation extends _DependencyTracker
   }
 }
 
+
+/// MUTABLE-AOT (#68, P1 PROTOTYPE). How many summary results had their
+/// constant attribute cleared, and for which declarations.
+int maotP1ConstantsCleared = 0;
+final Set<String> maotP1ClearedMembers = <String>{};
+
+/// Returns [t] with any constant attribute removed.
+///
+/// The closure attribute is PRESERVED. `TypeAttributes` carries both, and
+/// dropping the closure alongside the constant would change closure inference
+/// for reasons that have nothing to do with mutability -- a much larger blast
+/// radius than the one being measured, and one that would be invisible in the
+/// numbers.
+///
+/// A ConcreteType carrying attributes never carries type arguments -- both
+/// `constantConcreteType` and `closureConcreteType` build with `typeArgs`
+/// null -- so rebuilding from the class loses nothing here.
+Type _maotStripConstantAttribute(Type t) {
+  if (t is! ConcreteType) return t;
+  final attrs = t.attributes;
+  if (attrs == null || attrs.constant == null) return t;
+  final closure = attrs.closure;
+  return closure != null
+      ? t.cls.closureConcreteType(closure.member, closure.function)
+      : t.cls.concreteType;
+}
+
+/// The P1 intervention: a mutable declaration's summary result must not carry
+/// a constant into its caller's summary.
+///
+/// Applied at [_DirectInvocation], which is the single funnel -- a
+/// dispatchable invocation resolves each target through a _DirectInvocation,
+/// so interface, dynamic and super calls are covered by the same hook as
+/// static ones.
+Type _maotP1Result(Member member, Type t) {
+  if (!maotP1ClearMutableConstants) return t;
+  if (!isMaotSelected(member)) return t;
+  final stripped = _maotStripConstantAttribute(t);
+  if (!identical(stripped, t)) {
+    maotP1ConstantsCleared++;
+    maotP1ClearedMembers.add(
+        '${member.enclosingLibrary.importUri}::${member.name.text}');
+  }
+  return stripped;
+}
+
 final class _DirectInvocation extends _Invocation {
   _DirectInvocation(DirectSelector selector, Args<Type> args)
     : super(selector, args) {
@@ -439,12 +486,11 @@ final class _DirectInvocation extends _Invocation {
       if (summaryResult is Type &&
           !typeFlowAnalysis.workList._isPending(this)) {
         assert(result == null || result == summaryResult);
-        setResult(typeFlowAnalysis, summaryResult);
+        setResult(typeFlowAnalysis, _maotP1Result(member, summaryResult));
       }
-      return summary.apply(
-        args,
-        typeFlowAnalysis.hierarchyCache,
-        typeFlowAnalysis,
+      return _maotP1Result(
+        member,
+        summary.apply(args, typeFlowAnalysis.hierarchyCache, typeFlowAnalysis),
       );
     } else {
       if (selector.callKind == CallKind.PropertyGet) {
