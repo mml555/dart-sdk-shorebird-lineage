@@ -339,6 +339,10 @@ class MaotRegistry : public AllStatic {
   // address rather than a Code pointer.
   static uword DeclarationTrampolineEntry(Thread* thread,
                                           const Function& function);
+  // The return address of the last switchable call site that transitioned out
+  // of UnlinkedCall. Diagnostic only; one slot, last writer wins.
+  static void RememberSwitchableSite(uword return_address);
+  static uword RememberedSwitchableSite();
   static intptr_t CellPoolIndexAt(Thread* thread, intptr_t entry);
   static void SetCellPoolIndexAt(Thread* thread,
                                  intptr_t entry,

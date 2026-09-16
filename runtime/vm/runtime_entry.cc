@@ -2874,6 +2874,12 @@ void PatchableCallHandler::DoUnlinkedCallAOT(const UnlinkedCall& unlinked,
           String::Handle(zone_, String::New("<runtime-dispatch>", Heap::kOld)),
           "instance-dispatch/UnlinkedCall-transition", buf,
           MaotRegistry::kSlotPreserving);
+      // Remember WHICH site this was, so the state object living at it can be
+      // read back later. Otherwise "the state did not change across the
+      // replacements" rests on "no miss was counted, therefore nothing
+      // re-patched it" -- sound, but an inference where a reading is
+      // available.
+      MaotRegistry::RememberSwitchableSite(caller_frame_->pc());
     }
   }
   CodePatcher::PatchSwitchableCallAt(caller_frame_->pc(), caller_code_, object,
