@@ -307,6 +307,10 @@ class MaotRegistry : public AllStatic {
   static ArrayPtr DispatchCellAt(Thread* thread, intptr_t entry);
   static CodePtr CellImplCodeAt(Thread* thread, intptr_t entry);
   static StringPtr DeclarationIdAt(Thread* thread, intptr_t entry);
+  static intptr_t NoteSwitchableStateHit(const char* state, bool converges);
+  static intptr_t SwitchableStateHits(const char* state);
+  static intptr_t SwitchableStateDivergences(const char* state);
+  static bool ShouldRecordSwitchableState(intptr_t hit_number);
   static bool IsTrampolineCode(Thread* thread, ObjectPtr code);
   static void SetTrampolineFor(Thread* thread,
                                intptr_t entry,
