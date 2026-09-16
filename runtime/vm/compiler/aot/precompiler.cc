@@ -870,6 +870,38 @@ void Precompiler::DoCompileAll() {
               dropped_constants_arrays_entries_count_);
   }
 
+  // MAOT-5 (#69). Dump FINAL call-site instructions for named callers, after
+  // every static-call rewrite has run (BindStaticCalls,
+  // ReplaceFunctionStaticCallEntries, dedup, repin). This is the point where
+  // "what the lowering intended" and "what will actually execute" can differ,
+  // and the super result says they do.
+  if (FLAG_maot_dump_caller_code != nullptr) {
+    FILE* out = fopen("/tmp/maot_caller_code.txt", "w");
+    if (out != nullptr) {
+      auto& fn = Function::Handle(Z);
+      auto& code = Code::Handle(Z);
+      // Walk retained functions directly from the precompiler's own set.
+      FunctionSet::Iterator it(&functions_to_retain_);
+      while (it.MoveNext()) {
+        fn ^= functions_to_retain_.GetKey(it.Current());
+        if (fn.IsNull() || !fn.HasCode()) continue;
+        const char* name = fn.ToFullyQualifiedCString();
+        if (strstr(name, FLAG_maot_dump_caller_code) == nullptr) continue;
+        code = fn.CurrentCode();
+        const uword start = code.PayloadStart();
+        const intptr_t size = code.Size();
+        fprintf(out, "[caller] %s size=%" Pd "\n", name, size);
+        fprintf(out, "[words]");
+        for (intptr_t off = 0; off + 4 <= size; off += 4) {
+          fprintf(out, " %08x", *reinterpret_cast<uint32_t*>(start + off));
+        }
+        fprintf(out, "\n");
+      }
+      fflush(out);
+      fclose(out);
+    }
+  }
+
   // MUTABLE-AOT (#66): dump the registry as the PRECOMPILER sees it, before
   // anything is serialized. Paired with the runtime dump, this separates "the
   // binding was wrong when we made it" from "the binding was lost in the

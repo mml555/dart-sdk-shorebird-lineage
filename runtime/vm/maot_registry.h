@@ -69,6 +69,7 @@ DECLARE_FLAG(bool, maot_install_trampolines);
 DECLARE_FLAG(bool, maot_trace_serializer);
 DECLARE_FLAG(charp, maot_trampoline_only);
 DECLARE_FLAG(charp, maot_trampoline_skip);
+DECLARE_FLAG(charp, maot_dump_caller_code);
 DECLARE_FLAG(bool, maot_dump_trampoline_shape);
 DECLARE_FLAG(int, maot_limit_selected);
 DECLARE_FLAG(bool, maot_trampoline_class_owner);

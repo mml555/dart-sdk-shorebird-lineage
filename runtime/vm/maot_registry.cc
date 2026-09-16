@@ -103,6 +103,15 @@ DEFINE_FLAG(charp,
             "so a given declaration can be moved off a particular ordinal "
             "while the trampoline count is held fixed.");
 
+DEFINE_FLAG(charp,
+            maot_dump_caller_code,
+            nullptr,
+            "DIAGNOSTIC. Dump the FINAL instruction words of every retained "
+            "function whose name contains this substring, after every "
+            "static-call rewrite has run. Used to compare a known-good #67 "
+            "static caller against a super caller and find the stage where "
+            "their routing diverges.");
+
 DEFINE_FLAG(bool,
             maot_dump_trampoline_shape,
             false,
