@@ -2455,8 +2455,23 @@ MAOT_TEST_EXPORT int64_t Dart_MaotIdentityReport(const char* declaration_id,
                              : impl_own_cell.At(MaotRegistry::kCellImplCode));
 
   fprintf(f, "decl=%s\n", declaration_id);
-  fprintf(f, "  cell.implFunction        = %s\n",
-          impl_fn.IsNull() ? "<null>" : impl_fn.ToCString());
+  // OWNER-QUALIFIED on purpose. Function::ToCString() renders only the
+  // member name, so three classes each declaring `v` all print
+  // "Function 'v':." and the line cannot distinguish which implementation
+  // the cell holds -- which is exactly the question a replacement sequence
+  // asks. Measured: a super run printed the same string at all four stages
+  // while the behaviour changed under it.
+  if (impl_fn.IsNull()) {
+    fprintf(f, "  cell.implFunction        = <null>\n");
+  } else {
+    const Class& impl_owner = Class::Handle(zone, impl_fn.Owner());
+    const String& owner_name =
+        String::Handle(zone, impl_owner.IsNull() ? String::null()
+                                                 : impl_owner.Name());
+    fprintf(f, "  cell.implFunction        = %s  (owner %s)\n",
+            impl_fn.ToCString(),
+            owner_name.IsNull() ? "<null>" : owner_name.ToCString());
+  }
   fprintf(f, "  seeded pool index        = %" Pd "\n", pool_index);
   fprintf(f, "  pool[index] IS the cell  = %s\n",
           (!cell.IsNull() && pooled.ptr() == cell.ptr()) ? "YES" : "NO");
