@@ -3362,8 +3362,16 @@ void PatchableCallHandler::HandleMissAOT(const Object& old_data,
     case kUnlinkedCallCid:
       ASSERT(old_entry ==
              StubCode::SwitchableCallMiss().MonomorphicEntryPoint());
-      MaotNoteSwitchableState(thread_, target_function,
-                              "instance-dispatch/UnlinkedCall-observed");
+      // can_patch_to_monomorphic decides the NEXT state: true gives the plain
+      // Smi-cid monomorphic form, false gives MonomorphicSmiableCall. Which
+      // one this configuration produces is a reachability fact, and
+      // UnlinkedCall::New's default (!FLAG_precompiled_mode) disagrees with
+      // what was observed -- so it is recorded rather than reasoned about.
+      MaotNoteSwitchableState(
+          thread_, target_function,
+          UnlinkedCall::Cast(old_data).can_patch_to_monomorphic()
+              ? "instance-dispatch/UnlinkedCall-observed"
+              : "instance-dispatch/MonomorphicSmiableCall-observed");
       DoUnlinkedCallAOT(UnlinkedCall::Cast(old_data), target_function);
       break;
     case kMonomorphicSmiableCallCid:
