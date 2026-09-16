@@ -3038,12 +3038,39 @@ void PatchableCallHandler::DoUnlinkedCallAOT(const UnlinkedCall& unlinked,
     const intptr_t hit = MaotRegistry::NoteSwitchableStateHit(
         "instance-dispatch/UnlinkedCall-observed", true);
     if (MaotRegistry::ShouldRecordSwitchableState(hit)) {
-      char buf[256];
+      // The full transition, at the ONE site it happened at. Site identity
+      // matters because "this state was entered somewhere" is not the claim
+      // -- the claim is about a particular call site that is then warmed and
+      // read through.
+      //
+      // MonomorphicSmiableCall stores its target as a RAW ADDRESS and holds
+      // no Code pointer, so nothing updates it when an implementation
+      // changes. Whether that address is the declaration's trampoline is
+      // therefore the whole convergence question for this state, and it is
+      // read back off the installed object rather than re-derived from the
+      // target function.
+      const uword tramp_entry =
+          MaotRegistry::DeclarationTrampolineEntry(thread_, target_function);
+      uword stored_entry = 0;
+      if (object.IsMonomorphicSmiableCall()) {
+        stored_entry = MonomorphicSmiableCall::Cast(object).entrypoint();
+      } else if (object.IsCode()) {
+        stored_entry = Code::Cast(object).EntryPoint();
+      } else if (!code.IsNull()) {
+        stored_entry = code.EntryPoint();
+      }
+      char buf[512];
       Utils::SNPrint(buf, sizeof(buf),
-                     "UnlinkedCall transition: can_patch_to_monomorphic=%d, "
-                     "installed state object = %s",
+                     "UnlinkedCall transition at site pc=0x%" Px
+                     ": can_patch_to_monomorphic=%d, installed state object = "
+                     "%s, stored target entry=0x%" Px
+                     ", declaration trampoline entry=0x%" Px ", stored target "
+                     "IS the declaration trampoline=%s",
+                     caller_frame_->pc(),
                      unlinked.can_patch_to_monomorphic() ? 1 : 0,
-                     object.ToCString());
+                     object.ToCString(), stored_entry, tramp_entry,
+                     (tramp_entry != 0 && stored_entry == tramp_entry) ? "YES"
+                                                                      : "NO");
       MaotRegistry::NoteDecision(
           thread_,
           String::Handle(zone_, MaotRegistry::DeclarationIdOf(thread_,

@@ -334,6 +334,11 @@ class MaotRegistry : public AllStatic {
                                intptr_t entry,
                                const Code& trampoline);
   static CodePtr TrampolineAt(Thread* thread, intptr_t entry);
+  // Entry point of `function`'s declaration trampoline, or 0 when it has
+  // none. For comparing against a switchable-call state that stores a raw
+  // address rather than a Code pointer.
+  static uword DeclarationTrampolineEntry(Thread* thread,
+                                          const Function& function);
   static intptr_t CellPoolIndexAt(Thread* thread, intptr_t entry);
   static void SetCellPoolIndexAt(Thread* thread,
                                  intptr_t entry,
