@@ -1810,6 +1810,20 @@ void Precompiler::SeedMutableAotRoots() {
           // diagnoses were retracted on that evidence. This classification
           // rests only on the post-P1 run.
           "super/static-cell",
+          // This state holds NO Code pointer -- only expected_cid and a raw
+          // entrypoint word frozen by New() from target.EntryPoint(). Nothing
+          // updates it when an implementation changes, so behaviour changing
+          // is not evidence for it; the address is.
+          //
+          // Entered positively by a site the analysis believes may receive an
+          // int (can_patch_to_monomorphic=0 is the only branch that installs
+          // it), then READ at that same site after the warm and after each of
+          // three replacements: same site pc, same state object, expected_cid
+          // unchanged, stored entrypoint unchanged and equal to the
+          // declaration trampoline's entry throughout, exactly one transition
+          // recorded. What it froze was the indirection, not the
+          // implementation, so it never needs invalidating.
+          "dynamic/MonomorphicSmiableCall",
       };
       for (const char* form : kProvenForms) {
         MaotRegistry::NoteDecision(
@@ -1825,7 +1839,6 @@ void Precompiler::SeedMutableAotRoots() {
       // safe: MonomorphicSmiableCall, SingleTargetCache and MegamorphicCache
       // were never entered by any fixture, and not observed is not disproven.
       static const char* const kUnprovenForms[] = {
-          "dynamic/MonomorphicSmiableCall",
           "dynamic/SingleTargetCache",
           "dynamic/MegamorphicCache",
       };
