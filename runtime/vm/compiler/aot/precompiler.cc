@@ -758,7 +758,9 @@ void Precompiler::DoCompileAll() {
 
       FinalizeDispatchTable();
       VerifyMaotDispatchTableTargets();
+      DumpMaotCallerCode("A-before-ReplaceFunctionStaticCallEntries");
       ReplaceFunctionStaticCallEntries();
+      DumpMaotCallerCode("B-after-ReplaceFunctionStaticCallEntries");
 
       {
         PRECOMPILER_TIMER_SCOPE(this, Drop);
@@ -819,6 +821,10 @@ void Precompiler::DoCompileAll() {
       ProgramVisitor::Dedup(T);
     }
 
+    // BindStaticCalls runs INSIDE ProgramVisitor::Dedup, so this is the
+    // first point after it.
+    DumpMaotCallerCode("C-after-Dedup-and-BindStaticCalls");
+
     // MUTABLE-AOT (#66): re-pin each descriptor's Code AFTER dedup.
     //
     // Materialization runs before the drop phase, which is before dedup, so
@@ -875,43 +881,6 @@ void Precompiler::DoCompileAll() {
   // ReplaceFunctionStaticCallEntries, dedup, repin). This is the point where
   // "what the lowering intended" and "what will actually execute" can differ,
   // and the super result says they do.
-  if (FLAG_maot_dump_caller_code != nullptr) {
-    // Walk the program the standard way. An earlier version iterated
-    // functions_to_retain_ directly and segfaulted gen_snapshot: that set is
-    // not a safe iteration target at this point in the pipeline.
-    class CallerCodeDumper : public FunctionVisitor {
-     public:
-      CallerCodeDumper(Zone* zone, FILE* out)
-          : zone_(zone), out_(out), code_(Code::Handle(zone)) {}
-      void VisitFunction(const Function& function) override {
-        if (function.IsNull() || !function.HasCode()) return;
-        const char* name = function.ToFullyQualifiedCString();
-        if (strstr(name, FLAG_maot_dump_caller_code) == nullptr) return;
-        code_ = function.CurrentCode();
-        const uword start = code_.PayloadStart();
-        const intptr_t size = code_.Size();
-        fprintf(out_, "[caller] %s size=%" Pd "\n", name, size);
-        fprintf(out_, "[words]");
-        for (intptr_t off = 0; off + 4 <= size; off += 4) {
-          fprintf(out_, " %08x", *reinterpret_cast<uint32_t*>(start + off));
-        }
-        fprintf(out_, "\n");
-        fflush(out_);
-      }
-
-     private:
-      Zone* zone_;
-      FILE* out_;
-      Code& code_;
-    };
-    FILE* out = fopen("/tmp/maot_caller_code.txt", "w");
-    if (out != nullptr) {
-      CallerCodeDumper dumper(Z, out);
-      ProgramVisitor::WalkProgram(Z, IG, &dumper);
-      fclose(out);
-    }
-  }
-
   // MUTABLE-AOT (#66): dump the registry as the PRECOMPILER sees it, before
   // anything is serialized. Paired with the runtime dump, this separates "the
   // binding was wrong when we made it" from "the binding was lost in the
@@ -2023,6 +1992,45 @@ void Precompiler::DumpMaotTrampolineShapes() {
     fclose(g_maot_shape_out);
     g_maot_shape_out = nullptr;
   }
+}
+
+void Precompiler::DumpMaotCallerCode(const char* stage) {
+  if (FLAG_maot_dump_caller_code == nullptr) return;
+  // Narrow on purpose: the walker is the mechanism, the FILTER is what makes
+  // this a paired two-caller trace rather than a whole-program dump. Called
+  // only in the window where the program is still walkable -- an earlier
+  // version ran at the end of DoCompileAll, after DropFunctions and
+  // PruneDictionaries, and segfaulted.
+  class CallerCodeDumper : public FunctionVisitor {
+   public:
+    CallerCodeDumper(Zone* zone, FILE* out, const char* stage)
+        : out_(out), stage_(stage), code_(Code::Handle(zone)) {}
+    void VisitFunction(const Function& function) override {
+      if (function.IsNull() || !function.HasCode()) return;
+      const char* name = function.ToFullyQualifiedCString();
+      if (strstr(name, FLAG_maot_dump_caller_code) == nullptr) return;
+      code_ = function.CurrentCode();
+      const uword start = code_.PayloadStart();
+      const intptr_t size = code_.Size();
+      fprintf(out_, "[stage=%s] %s size=%" Pd "\n", stage_, name, size);
+      fprintf(out_, "[words]");
+      for (intptr_t off = 0; off + 4 <= size; off += 4) {
+        fprintf(out_, " %08x", *reinterpret_cast<uint32_t*>(start + off));
+      }
+      fprintf(out_, "\n");
+      fflush(out_);
+    }
+
+   private:
+    FILE* out_;
+    const char* stage_;
+    Code& code_;
+  };
+  FILE* out = fopen("/tmp/maot_caller_code.txt", "a");
+  if (out == nullptr) return;
+  CallerCodeDumper dumper(Z, out, stage);
+  ProgramVisitor::WalkProgram(Z, IG, &dumper);
+  fclose(out);
 }
 
 void Precompiler::VerifyMaotDispatchTableTargets() {
