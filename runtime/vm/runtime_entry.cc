@@ -3052,8 +3052,10 @@ void PatchableCallHandler::DoUnlinkedCallAOT(const UnlinkedCall& unlinked,
       const uword tramp_entry =
           MaotRegistry::DeclarationTrampolineEntry(thread_, target_function);
       uword stored_entry = 0;
+      intptr_t expected_cid = -1;
       if (object.IsMonomorphicSmiableCall()) {
         stored_entry = MonomorphicSmiableCall::Cast(object).entrypoint();
+        expected_cid = MonomorphicSmiableCall::Cast(object).expected_cid();
       } else if (object.IsCode()) {
         stored_entry = Code::Cast(object).EntryPoint();
       } else if (!code.IsNull()) {
@@ -3063,12 +3065,13 @@ void PatchableCallHandler::DoUnlinkedCallAOT(const UnlinkedCall& unlinked,
       Utils::SNPrint(buf, sizeof(buf),
                      "UnlinkedCall transition at site pc=0x%" Px
                      ": can_patch_to_monomorphic=%d, installed state object = "
-                     "%s, stored target entry=0x%" Px
+                     "%s, expected_cid=%" Pd ", stored target entry=0x%" Px
                      ", declaration trampoline entry=0x%" Px ", stored target "
                      "IS the declaration trampoline=%s",
                      caller_frame_->pc(),
                      unlinked.can_patch_to_monomorphic() ? 1 : 0,
-                     object.ToCString(), stored_entry, tramp_entry,
+                     object.ToCString(), expected_cid, stored_entry,
+                     tramp_entry,
                      (tramp_entry != 0 && stored_entry == tramp_entry) ? "YES"
                                                                       : "NO");
       MaotRegistry::NoteDecision(
