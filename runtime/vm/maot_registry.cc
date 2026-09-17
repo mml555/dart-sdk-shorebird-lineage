@@ -2477,6 +2477,64 @@ uword MaotRegistry::RememberedSwitchableSite() {
   return g_maot_last_switchable_site;
 }
 
+void MaotRegistry::ClassifyCodePointer(Thread* thread,
+                                       ObjectPtr candidate,
+                                       char* buf,
+                                       intptr_t buf_len) {
+  buf[0] = '\0';
+  if (candidate == Object::null()) {
+    Utils::SNPrint(buf, buf_len, "null");
+    return;
+  }
+  Zone* zone = thread->zone();
+  const intptr_t entries = Length(thread);
+  auto& field = Object::Handle(zone);
+  auto& fn = Function::Handle(zone);
+  auto& id = String::Handle(zone);
+  auto& cell = Array::Handle(zone);
+  intptr_t written = 0;
+  const struct { EntryField f; const char* name; } kCodeFields[] = {
+      {kCurrentCode, "kCurrentCode"},
+      {kReleaseCode, "kReleaseCode"},
+      {kTrampolineCode, "kTrampolineCode"},
+  };
+  for (intptr_t i = 0; i < entries; i++) {
+    id = String::RawCast(FieldAt(thread, i, kDeclarationId));
+    for (const auto& cf : kCodeFields) {
+      field = FieldAt(thread, i, cf.f);
+      if (field.ptr() == candidate) {
+        written += Utils::SNPrint(buf + written, buf_len - written,
+                                  "%s[%s] ", cf.name,
+                                  id.IsNull() ? "?" : id.ToCString());
+      }
+    }
+    cell ^= FieldAt(thread, i, kDispatchCell);
+    if (!cell.IsNull() && cell.Length() > kCellImplCode &&
+        cell.At(kCellImplCode) == candidate) {
+      written += Utils::SNPrint(buf + written, buf_len - written,
+                                "cellImplCode[%s] ",
+                                id.IsNull() ? "?" : id.ToCString());
+    }
+    // Function::CurrentCode of the current and release implementations.
+    const struct { EntryField f; const char* name; } kFnFields[] = {
+        {kCurrentImpl, "currentImpl.CurrentCode"},
+        {kReleaseImpl, "releaseImpl.CurrentCode"},
+        {kStagedImpl, "stagedImpl.CurrentCode"},
+    };
+    for (const auto& ff : kFnFields) {
+      fn ^= FieldAt(thread, i, ff.f);
+      if (!fn.IsNull() && fn.HasCode() && fn.CurrentCode() == candidate) {
+        written += Utils::SNPrint(buf + written, buf_len - written, "%s[%s] ",
+                                  ff.name, id.IsNull() ? "?" : id.ToCString());
+      }
+    }
+    if (written > buf_len - 128) break;
+  }
+  if (written == 0) {
+    Utils::SNPrint(buf, buf_len, "NO_REGISTRY_MATCH");
+  }
+}
+
 uword MaotRegistry::DeclarationTrampolineEntry(Thread* thread,
                                                const Function& function) {
   if (function.IsNull()) return 0;

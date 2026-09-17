@@ -298,6 +298,15 @@ class MaotRegistry : public AllStatic {
   // has installed one.
   static CodePtr PinnedBodyCodeFor(Thread* thread, const Function& impl);
 
+  // Classify a raw Code pointer against every Code-valued field the registry
+  // holds, by POINTER EQUALITY only -- the candidate is never dereferenced,
+  // because the reason to ask is usually that it is suspect. Writes a short
+  // description into `buf`.
+  static void ClassifyCodePointer(Thread* thread,
+                                  ObjectPtr candidate,
+                                  char* buf,
+                                  intptr_t buf_len);
+
   // Records that one more indirect call site was emitted for `function`.
   static void NoteCallSiteEmitted(Thread* thread, const Function& function);
   // Records an inliner verdict for a mutable callee. `admitted` false means
