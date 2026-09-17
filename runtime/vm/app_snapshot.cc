@@ -2913,10 +2913,19 @@ class CodeSerializationCluster : public SerializationCluster {
       WriteFill(s, kind, code, /*deferred=*/false);
     }
     const intptr_t deferred_count = deferred_objects_.length();
+    // The main loop was instrumented and completes; the crash is after it, so
+    // the deferred loop is the next candidate and needs the same raw,
+    // non-dereferencing record. WriteFill's ENTER_CODE dereferences to print,
+    // so a bad deferred entry faults inside the print and leaves no trace of
+    // which object it was.
+    MaotSerTrace("DEFERRED_BEGIN count=%" Pd "\n", deferred_count);
     for (intptr_t i = 0; i < deferred_count; i++) {
       CodePtr code = deferred_objects_[i];
+      MaotSerTrace("DEFERRED %" Pd "/%" Pd " raw=%p\n", i, deferred_count,
+                   reinterpret_cast<void*>(static_cast<uword>(code)));
       WriteFill(s, kind, code, /*deferred=*/true);
     }
+    MaotSerTrace("DEFERRED_END count=%" Pd "\n", deferred_count);
   }
 
   void WriteFill(Serializer* s,
