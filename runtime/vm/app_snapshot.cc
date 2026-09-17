@@ -2826,6 +2826,13 @@ class CodeSerializationCluster : public SerializationCluster {
     const intptr_t count = objects_.length();
     for (intptr_t i = 0; i < count; i++) {
       CodePtr code = objects_[i];
+      // RAW, deliberately not dereferenced. ENTER_CODE prints code->untag(),
+      // so if the entry is dangling the fault happens inside the print and
+      // the object that caused it is never named. This records the pointer
+      // VALUE first, so a bad entry can be identified rather than inferred
+      // from the gap where its trace line should have been.
+      MaotSerTrace("LOOP %" Pd "/%" Pd " raw=%p\n", i, count,
+                   reinterpret_cast<void*>(static_cast<uword>(code)));
 #if defined(DART_PRECOMPILER)
       if (FLAG_write_v8_snapshot_profile_to != nullptr &&
           Code::IsDiscarded(code)) {
