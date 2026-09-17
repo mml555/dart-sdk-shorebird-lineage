@@ -8539,6 +8539,8 @@ void Serializer::PrepareInstructions(
       pc_mapping.WriteFixed<UntaggedInstructionsTable::Data>(header);
     }
 
+    MaotSerTrace("PREP bd.1 header_written bytes=%" Pd "\n",
+                 pc_mapping.bytes_written());
     // Reserve space for the binary search table.
     for (auto& cmd : writer_commands) {
       if (cmd.op == ImageWriterCommand::InsertInstructionOfCode) {
@@ -8546,6 +8548,8 @@ void Serializer::PrepareInstructions(
       }
     }
 
+    MaotSerTrace("PREP bd.2 bsearch_reserved bytes=%" Pd "\n",
+                 pc_mapping.bytes_written());
     // Now write collected stack maps after the binary search table.
     auto write_stack_map = [&](CompressedStackMapsPtr smap) {
       const auto flags_and_size = smap->untag()->payload()->flags_and_size();
@@ -8560,13 +8564,18 @@ void Serializer::PrepareInstructions(
       write_stack_map(sm->map);
     }
 
-    // Write canonical entries (if any).
+    MaotSerTrace("PREP bd.3 maps_written bytes=%" Pd "\n",
+                 pc_mapping.bytes_written());
+    // Write canonical entries (if any). NOTE: this map was NOT covered by the
+    // audit above, which only walked the collected stack_maps list.
     if (!canonical_stack_map_entries.IsNull()) {
       auto header = reinterpret_cast<UntaggedInstructionsTable::Data*>(
           pc_mapping.buffer());
       header->canonical_stack_map_entries_offset = pc_mapping.bytes_written();
       write_stack_map(canonical_stack_map_entries.ptr());
     }
+    MaotSerTrace("PREP bd.4 canonical_done bytes=%" Pd "\n",
+                 pc_mapping.bytes_written());
     const auto total_bytes = pc_mapping.bytes_written();
 
     // Now that we have offsets to all stack maps we can write binary
@@ -8587,6 +8596,7 @@ void Serializer::PrepareInstructions(
             {static_cast<uint32_t>(entry), offset});
       }
     }
+    MaotSerTrace("PREP bd.5 bsearch_filled\n");
     // Restore position so that Steal does not truncate the buffer.
     pc_mapping.SetPosition(total_bytes);
 
