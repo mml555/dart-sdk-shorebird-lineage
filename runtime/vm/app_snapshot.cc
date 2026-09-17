@@ -8620,6 +8620,11 @@ void Serializer::PrepareInstructions(
     }
     MaotSerTrace("PREP bd.8 instructions_table_done\n");
   }
+  // After the block's scope exit, so its destructors (pc_mapping,
+  // writer_commands, stack_maps, stack_maps_info) have all run. bd.8 is the
+  // last line in the trace and POST END never prints, which leaves only the
+  // scope exit and the function epilogue between them.
+  MaotSerTrace("PREP bd.9 scope_exited\n");
 #endif  // defined(DART_PRECOMPILER) && !defined(TARGET_ARCH_IA32)
 }
 
