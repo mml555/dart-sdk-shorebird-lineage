@@ -1832,6 +1832,19 @@ void Precompiler::SeedMutableAotRoots() {
           // cache needs is the condition that otherwise lets TFA devirtualise
           // the site away onto #67's static route.
           "dynamic/SingleTargetCache",
+          // Caches a FUNCTION per receiver cid, from a table keyed by selector
+          // and shared across call sites -- so what it retains, not where it
+          // lives, is the question. Measured: the entry holds the DECLARATION
+          // Function (owner Alpha, not AlphaNew/AlphaNew2) at one
+          // byte-identical address across every reading, and that Function's
+          // CurrentCode is the trampoline. It never retains an implementation
+          // Function whose body would be frozen at resolution time.
+          //
+          // Across three replacements the Alpha entry was not rewritten, no
+          // new resolution or miss occurred, and a second mutable declaration
+          // holding its own entry in the SAME shared cache -- with its own
+          // distinct trampoline -- did not move.
+          "dynamic/MegamorphicCache",
       };
       for (const char* form : kProvenForms) {
         MaotRegistry::NoteDecision(
@@ -1843,22 +1856,30 @@ void Precompiler::SeedMutableAotRoots() {
             MaotRegistry::kSlotPreserving);
       }
 
-      // Everything else stays blocking. An unreached state is UNPROVEN, not
-      // safe: MonomorphicSmiableCall, SingleTargetCache and MegamorphicCache
-      // were never entered by any fixture, and not observed is not disproven.
-      static const char* const kUnprovenForms[] = {
-          "dynamic/MegamorphicCache",
-      };
-      for (const char* form : kUnprovenForms) {
-        MaotRegistry::NoteDecision(
-            T, decl, caller, form,
-            "this call form or switchable-call state has not been shown to "
-            "converge on the declaration trampoline; #69 owes it separate "
-            "mechanical evidence and it may not inherit another form's",
-            MaotRegistry::kUnmodeledBlocking);
-        // No explicit NoteEscapeById: NoteDecision already projects a
-        // blocking disposition into an escape. Both would double-count.
-      }
+      // NOTHING REMAINS UNPROVEN for the dynamic dispatch surface. Every
+      // form listed above carries its own mechanical evidence: the state was
+      // positively ENTERED -- never "not observed, therefore fine", which is
+      // the vacuous pass this programme refuses -- and then read at the site
+      // across successive replacements.
+      //
+      // A form that cannot be shown to converge belongs HERE, recorded with
+      // kUnmodeledBlocking and the reason below, which is what the list held
+      // until each of these was proven:
+      //
+      //   MaotRegistry::NoteDecision(
+      //       T, decl, caller, "<form>",
+      //       "this call form or switchable-call state has not been shown to "
+      //       "converge on the declaration trampoline; #69 owes it separate "
+      //       "mechanical evidence and it may not inherit another form's",
+      //       MaotRegistry::kUnmodeledBlocking);
+      //
+      // NoteDecision already projects a blocking disposition into an escape,
+      // so no explicit NoteEscapeById belongs with it -- both would
+      // double-count.
+      //
+      // This is NOT a statement that the whole of #69 is proven. It covers
+      // the dispatch FORMS reaching this declaration. Getters, setters,
+      // operators, callable-class calls and tear-offs are separate work.
     }
 
     // MAOT-4 (#68) falsification control: attribute one decision with the
