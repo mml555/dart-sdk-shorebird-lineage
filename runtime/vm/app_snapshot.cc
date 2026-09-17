@@ -8598,8 +8598,17 @@ void Serializer::PrepareInstructions(
     }
 
     GrowableArray<ImageWriterCommand> writer_commands;
+    // The Code sort completes with no duplicates, so the fault is past it.
+    // RelocateCodeObjects finalizes bare-instructions PC-relative calls --
+    // generated code containing a branch, which is what a trampoline is.
+    // Bracketed, not assumed.
+    MaotSerTrace("PREP code_objects=%" Pd " BEGIN RelocateCodeObjects\n",
+                 code_objects.length());
     RelocateCodeObjects(&code_objects, &writer_commands);
+    MaotSerTrace("PREP END RelocateCodeObjects commands=%" Pd "\n",
+                 writer_commands.length());
     image_writer_->PrepareForSerialization(&writer_commands);
+    MaotSerTrace("PREP END PrepareForSerialization\n");
 
     if (code_objects.length() == 0) {
       return;
@@ -8631,6 +8640,8 @@ void Serializer::PrepareInstructions(
     uint32_t total = 0;
     intptr_t not_discarded_count = 0;
     uint32_t first_entry_with_code = 0;
+    MaotSerTrace("PREP BEGIN stackmap_scan commands=%" Pd "\n",
+                 writer_commands.length());
     for (auto& cmd : writer_commands) {
       if (cmd.op == ImageWriterCommand::InsertInstructionOfCode) {
         RELEASE_ASSERT(code_objects[total] ==
@@ -9161,7 +9172,7 @@ ZoneGrowableArray<Object*>* Serializer::Serialize(SerializationRoots* roots) {
   MaotSerTrace("POST HEADER num_base_objects=%" Pd " num_objects=%" Pd
                " clusters=%" Pd " instructions_table_len=%" Pd
                " rodata_offset=%" Pd "\n",
-               num_base_objects_, num_objects, clusters.length(),
+               num_base_objects_, num_objects, clusters_.length(),
                instructions_table_len_, instructions_table_rodata_offset_);
 #if defined(ARCH_IS_64_BIT)
   if (!Utils::IsInt(32, num_objects)) {
