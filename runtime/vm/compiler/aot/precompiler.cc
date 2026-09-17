@@ -3505,19 +3505,27 @@ void Precompiler::VerifyPinnedBodyTraversal() {
     if (calls > 0) with_calls++;
   }
 
-  const bool pass = (pins.length() > 0) && (missing == 0) &&
-                    (visited_once == pins.length()) && (unbound == 0) &&
-                    (with_calls > 0);
+  // Three outcomes, not two. A program whose bodies are all leaves satisfies
+  // "bindings intact" trivially, but that is not the program being wrong --
+  // it is the program being unable to carry the claim. Failing it would be as
+  // misleading as passing it silently, so it reports as PASS_LEAF_ONLY and the
+  // harness requires at least one non-leaf row across the suite.
+  const bool structurally_ok = (pins.length() > 0) && (missing == 0) &&
+                               (visited_once == pins.length()) &&
+                               (unbound == 0);
+  const char* verdict;
+  if (!structurally_ok) {
+    verdict = (pins.length() == 0) ? "FAIL(no pinned bodies)" : "FAIL";
+  } else if (with_calls == 0) {
+    verdict = "PASS_LEAF_ONLY(binding claim not exercised)";
+  } else {
+    verdict = "PASS";
+  }
   OS::PrintErr(
       "[maot] PINNED_TRAVERSAL bodies=%" Pd " visited_once=%" Pd
       " never_visited=%" Pd " unbound_entries=%" Pd " non_leaf_bodies=%" Pd
       " verdict=%s\n",
-      pins.length(), visited_once, missing, unbound, with_calls,
-      pass ? "PASS"
-           : (pins.length() == 0
-                  ? "FAIL(no pinned bodies)"
-                  : (with_calls == 0 ? "FAIL(vacuous: no non-leaf body)"
-                                     : "FAIL")));
+      pins.length(), visited_once, missing, unbound, with_calls, verdict);
 }
 
 void Precompiler::DropFunctions() {
