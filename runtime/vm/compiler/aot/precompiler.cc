@@ -3270,8 +3270,18 @@ void Precompiler::ReplaceFunctionStaticCallEntries() {
           target_code_(Code::Handle(zone)),
           pool_(ObjectPool::Handle(zone)) {}
 
+    // MAOT-5 (#69). A probe reporting "0 findings" is indistinguishable from
+    // a probe that never ran, so the pass reports what it visited too.
+    intptr_t maot_codes_visited = 0;
+    intptr_t maot_entries_seen = 0;
+    intptr_t maot_entries_skipped_kind = 0;
+    intptr_t maot_entries_null_fn = 0;
+    intptr_t maot_entries_left_empty = 0;
+    intptr_t maot_entries_bound = 0;
+
     void VisitCode(const Code& code) {
       if (!code.IsFunctionCode()) return;
+      maot_codes_visited++;
       table_ = code.static_calls_target_table();
       StaticCallsTable static_calls(table_);
 
@@ -3293,8 +3303,11 @@ void Precompiler::ReplaceFunctionStaticCallEntries() {
         kind_and_offset_ = view.Get<Code::kSCallTableKindAndOffset>();
         auto const kind = Code::KindField::decode(kind_and_offset_.Value());
 
-        if ((kind != Code::kCallViaCode) && (kind != Code::kPcRelativeCall))
+        maot_entries_seen++;
+        if ((kind != Code::kCallViaCode) && (kind != Code::kPcRelativeCall)) {
+          maot_entries_skipped_kind++;
           continue;
+        }
 
         target_function_ = view.Get<Code::kSCallTableFunctionTarget>();
         if (target_function_.IsNull()) {
@@ -3304,8 +3317,10 @@ void Precompiler::ReplaceFunctionStaticCallEntries() {
           // ASSERT(target_.IsCode()) is compiled out and a null destination
           // is dereferenced. Record it here, where the callee is still
           // identifiable, rather than at the fault.
+          maot_entries_null_fn++;
           if (FLAG_maot_trace_serializer &&
               view.Get<Code::kSCallTableCodeOrTypeTarget>() == Code::null()) {
+            maot_entries_left_empty++;
             OS::PrintErr("[maot] BIND_EMPTY_ENTRY caller=%s kind=%d off=%" Pd
                          "\n",
                          code.QualifiedName(
@@ -3329,6 +3344,7 @@ void Precompiler::ReplaceFunctionStaticCallEntries() {
         }
         target_code_ = target_function_.CurrentCode();
         ASSERT(!target_code_.IsStubCode());
+        maot_entries_bound++;
         view.Set<Code::kSCallTableCodeOrTypeTarget>(target_code_);
         view.Set<Code::kSCallTableFunctionTarget>(Object::null_function());
         if (kind == Code::kCallViaCode) {
@@ -3359,6 +3375,15 @@ void Precompiler::ReplaceFunctionStaticCallEntries() {
   HANDLESCOPE(T);
   StaticCallTableEntryFixer visitor(Z);
   ProgramVisitor::WalkProgram(Z, IG, &visitor);
+  if (FLAG_maot_trace_serializer) {
+    OS::PrintErr("[maot] BIND_PASS codes=%" Pd " entries=%" Pd
+                 " skipped_kind=%" Pd " null_fn=%" Pd " left_empty=%" Pd
+                 " bound=%" Pd "\n",
+                 visitor.maot_codes_visited, visitor.maot_entries_seen,
+                 visitor.maot_entries_skipped_kind,
+                 visitor.maot_entries_null_fn, visitor.maot_entries_left_empty,
+                 visitor.maot_entries_bound);
+  }
 }
 
 void Precompiler::DropFunctions() {

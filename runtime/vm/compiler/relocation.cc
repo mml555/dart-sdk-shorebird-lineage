@@ -308,6 +308,22 @@ void CodeRelocator::ScanCallTargets(const Code& code,
                      g_maot_reloc_code_ord, maot_call_ord - 1, raw_before,
                      raw_after, cls);
 
+      // A null destination is the fault. Object::null() is a real allocated
+      // heap object in this VM, so it prints as a live address and cannot be
+      // recognised by eye -- read the table slots instead of the pointer.
+      if (destination_.ptr() == Object::null()) {
+        const auto& fn_slot =
+            Object::Handle(call.Get<Code::kSCallTableFunctionTarget>());
+        const auto& code_slot =
+            Object::Handle(call.Get<Code::kSCallTableCodeOrTypeTarget>());
+        MaotRelocTrace("    c%" Pd ".%" Pd " NULL_DEST fn_slot=%s"
+                       " code_slot=%s table_len=%" Pd "\n",
+                       g_maot_reloc_code_ord, maot_call_ord - 1,
+                       fn_slot.IsNull() ? "<null>" : fn_slot.ToCString(),
+                       code_slot.IsNull() ? "<null>" : code_slot.ToCString(),
+                       call_targets.Length());
+      }
+
       // What object is the destination, really? This reads the destination's
       // own header and fields only. It never dereferences instructions_,
       // which is the pointer STEP4 faults on.
