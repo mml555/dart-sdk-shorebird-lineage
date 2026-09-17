@@ -3609,7 +3609,27 @@ static void MaotNoteSwitchableState(Thread* thread,
   // second says the instrumentation is simply not interested in it.
   MaotRegistry::NoteSwitchableStateHit("any-dispatch/miss-observed", true);
   if (target.IsNull()) return;
-  if (!MaotRegistry::IsMutableDeclaration(thread, target)) return;
+  if (!MaotRegistry::IsMutableDeclaration(thread, target)) {
+    // Bounded and deduplicated: at most kCap distinct names, each printed
+    // once, no allocation after the cap. The setter/operator/callable sites
+    // are switchable calls -- that is settled by disassembly -- so a target
+    // arriving here that the registry does not recognise as a declaration is
+    // the thing to name, not to infer.
+    if (FLAG_maot_trace_registration) {
+      static constexpr intptr_t kCap = 32;
+      static const char* seen[kCap] = {};
+      static intptr_t seen_n = 0;
+      const char* name = target.ToFullyQualifiedCString();
+      for (intptr_t i = 0; i < seen_n; i++) {
+        if (strcmp(seen[i], name) == 0) return;
+      }
+      if (seen_n < kCap) {
+        seen[seen_n++] = Utils::StrDup(name);
+        OS::PrintErr("[maot] MISS_UNTRACKED %s  state=%s\n", name, state);
+      }
+    }
+    return;
+  }
   Zone* zone = thread->zone();
   const intptr_t entry = MaotRegistry::IndexOf(
       thread, String::Handle(zone, MaotRegistry::DeclarationIdOf(thread,
