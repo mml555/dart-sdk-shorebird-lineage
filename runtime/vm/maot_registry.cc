@@ -96,11 +96,12 @@ DEFINE_FLAG(bool,
 DEFINE_FLAG(bool,
             maot_install_trampolines,
             false,
-            "MAOT-5 (#69), OFF by default. Install a dispatch trampoline as "
-            "each selected declaration's CurrentCode so instance dispatch "
-            "resolves through the mutable cell. Default off because the "
-            "mechanism does not yet serialize above a small population, and "
-            "#66/#67/#68 are accepted work that must keep passing meanwhile.");
+            "Enable Mutable-AOT trampoline installation for selected "
+            "declarations: a dispatch trampoline becomes each selected "
+            "declaration's CurrentCode so instance dispatch resolves through "
+            "the mutable cell. Experimental; disabled by default pending "
+            "real-application population validation and production-readiness "
+            "gates.");
 
 DEFINE_FLAG(bool,
             maot_trace_serializer,
