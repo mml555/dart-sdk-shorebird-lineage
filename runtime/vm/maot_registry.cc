@@ -1114,10 +1114,6 @@ void MaotRegistry::ForEachPinnedCode(
     Thread* thread,
     Zone* zone,
     const std::function<void(const Code&)>& visit) {
-  // Falsification control lives here, not at the call site in
-  // ProgramVisitor::WalkProgram: that file is compiled into more library
-  // variants than this one, so referencing the flag there does not link.
-  if (FLAG_maot_disable_pinned_body_roots) return;
   const intptr_t entries = Length(thread);
   auto& code = Code::Handle(zone);
   for (intptr_t i = 0; i < entries; i++) {
@@ -1135,6 +1131,17 @@ void MaotRegistry::ForEachPinnedCode(
     code ^= raw.ptr();
     visit(code);
   }
+}
+
+void MaotRegistry::AddPinnedCodeRoots(
+    Thread* thread,
+    Zone* zone,
+    const std::function<void(const Code&)>& visit) {
+  // Falsification control lives here rather than at the call site in
+  // ProgramVisitor::WalkProgram: that file is compiled into more library
+  // variants than this one, so naming the flag there does not link.
+  if (FLAG_maot_disable_pinned_body_roots) return;
+  ForEachPinnedCode(thread, zone, visit);
 }
 
 void MaotRegistry::CanonicalizeCodePins(

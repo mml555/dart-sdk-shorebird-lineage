@@ -396,6 +396,17 @@ class MaotRegistry : public AllStatic {
                                 Zone* zone,
                                 const std::function<void(const Code&)>& visit);
 
+  // What the program walk is fed. Same set as ForEachPinnedCode, except that
+  // --maot_disable_pinned_body_roots suppresses it.
+  //
+  // Kept separate on purpose: the traversal regression must be able to ask
+  // "what does the registry pin?" while the roots are suppressed, or its
+  // negative control reports "no pinned bodies" instead of the defect's real
+  // signature -- bodies that exist and are never visited.
+  static void AddPinnedCodeRoots(Thread* thread,
+                                 Zone* zone,
+                                 const std::function<void(const Code&)>& visit);
+
   static void SetInlineCountsFor(Thread* thread,
                                  const String& declaration_id,
                                  intptr_t refusals,
