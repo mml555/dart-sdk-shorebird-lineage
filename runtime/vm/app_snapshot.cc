@@ -8695,6 +8695,32 @@ void Serializer::PrepareInstructions(
     // END for the BEGIN above. Its absence made "BEGIN with no END" read as
     // "faulted inside the scan", which it never established -- it only showed
     // that execution reached the BEGIN.
+    // Is every collected map actually a CompressedStackMaps? write_stack_map
+    // dereferences smap->untag()->payload() with no check, and the scan above
+    // collects compressed_stackmaps_ from every Code unconditionally. Counted
+    // rather than assumed, because the fault lands in build_data.
+    {
+      intptr_t null_maps = 0, wrong_cid = 0, discarded_owners = 0;
+      for (auto info : stack_maps) {
+        if (info->map == CompressedStackMaps::null()) {
+          null_maps++;
+          continue;
+        }
+        if (info->map->GetClassIdOfHeapObject() != kCompressedStackMapsCid) {
+          wrong_cid++;
+        }
+      }
+      for (auto& cmd : writer_commands) {
+        if (cmd.op == ImageWriterCommand::InsertInstructionOfCode &&
+            Code::IsDiscarded(cmd.insert_instruction_of_code.code)) {
+          discarded_owners++;
+        }
+      }
+      MaotSerTrace("PREP STACKMAP_AUDIT maps=%" Pd " null=%" Pd
+                   " wrong_cid=%" Pd " discarded_code=%" Pd "\n",
+                   stack_maps.length(), null_maps, wrong_cid,
+                   discarded_owners);
+    }
     MaotSerTrace("PREP END stackmap_scan total=%u maps=%" Pd "\n", total,
                  stack_maps.length());
     ASSERT(static_cast<intptr_t>(total) == code_index_.Length());
