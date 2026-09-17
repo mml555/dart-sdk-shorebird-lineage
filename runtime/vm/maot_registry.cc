@@ -609,18 +609,16 @@ ArrayPtr MaotRegistry::DispatchCellForFunction(Thread* thread,
   if (function.IsNull()) return Array::null();
   Zone* zone = thread->zone();
   const intptr_t entries = Length(thread);
-  auto& candidate = Function::Handle(zone);
-  for (intptr_t i = 0; i < entries; i++) {
-    if (Smi::Value(Smi::RawCast(FieldAt(thread, i, kSelected))) != 1) continue;
-    candidate ^= FieldAt(thread, i, kCurrentImpl);
-    // Object identity. The loader bound this exact Function to this exact
-    // DeclarationId; comparing anything else -- a name, a URI, an address --
-    // would be the reconstruction step this program exists to remove.
-    if (candidate.ptr() == function.ptr()) {
-      return Array::RawCast(FieldAt(thread, i, kDispatchCell));
-    }
-  }
-  return Array::null();
+  // Object identity against the STABLE declaration Function. The loader bound
+  // this exact Function to this exact DeclarationId; comparing anything else
+  // -- a name, a URI, an address -- would be the reconstruction step this
+  // program exists to remove. Keying on kCurrentImpl instead made the answer
+  // depend on whether an install had happened yet.
+  USE(entries);
+  USE(zone);
+  const intptr_t entry = EntryForDeclarationFunction(thread, function);
+  if (entry < 0) return Array::null();
+  return Array::RawCast(FieldAt(thread, entry, kDispatchCell));
 }
 
 bool MaotRegistry::IsMutableDeclaration(Thread* thread,
@@ -763,20 +761,68 @@ StringPtr MaotRegistry::AnyDeclarationIdOf(Thread* thread,
   return String::null();
 }
 
+intptr_t MaotRegistry::EntryForDeclarationFunction(Thread* thread,
+                                                  const Function& function) {
+  if (function.IsNull()) return -1;
+  Zone* zone = thread->zone();
+  const intptr_t entries = Length(thread);
+  auto& candidate = Function::Handle(zone);
+  for (intptr_t i = 0; i < entries; i++) {
+    if (Smi::Value(Smi::RawCast(FieldAt(thread, i, kSelected))) != 1) continue;
+    // kReleaseImpl: captured once at registration and never overwritten, so
+    // it is the declaration's stable Function identity. kCurrentImpl moves
+    // with every install and cannot answer "is this a declaration".
+    candidate ^= FieldAt(thread, i, kReleaseImpl);
+    if (candidate.ptr() == function.ptr()) return i;
+  }
+  return -1;
+}
+
 StringPtr MaotRegistry::DeclarationIdOf(Thread* thread,
                                         const Function& function) {
-  if (function.IsNull()) return String::null();
+  const intptr_t entry = EntryForDeclarationFunction(thread, function);
+  if (entry < 0) return String::null();
+  return String::RawCast(FieldAt(thread, entry, kDeclarationId));
+}
+
+StringPtr MaotRegistry::DeclarationIdSuppliedBy(Thread* thread,
+                                                const Function& impl) {
+  if (impl.IsNull()) return String::null();
   Zone* zone = thread->zone();
   const intptr_t entries = Length(thread);
   auto& candidate = Function::Handle(zone);
   for (intptr_t i = 0; i < entries; i++) {
     if (Smi::Value(Smi::RawCast(FieldAt(thread, i, kSelected))) != 1) continue;
     candidate ^= FieldAt(thread, i, kCurrentImpl);
-    if (candidate.ptr() == function.ptr()) {
+    if (candidate.ptr() == impl.ptr()) {
       return String::RawCast(FieldAt(thread, i, kDeclarationId));
     }
   }
   return String::null();
+}
+
+CodePtr MaotRegistry::PinnedBodyCodeFor(Thread* thread, const Function& impl) {
+  if (impl.IsNull()) return Code::null();
+  Zone* zone = thread->zone();
+  // A registered declaration pinned its body Code at materialization, BEFORE
+  // AttachCode replaced Function::CurrentCode() with the trampoline, and that
+  // pin is canonicalized in Dedup. So the pin is the body; CurrentCode() is
+  // not.
+  const intptr_t entry = EntryForDeclarationFunction(thread, impl);
+  if (entry >= 0) {
+    const auto& pinned = Object::Handle(zone, FieldAt(thread, entry,
+                                                      kCurrentCode));
+    if (pinned.IsCode() && !IsTrampolineCode(thread, pinned.ptr())) {
+      return Code::RawCast(pinned.ptr());
+    }
+  }
+  // Unregistered implementation: CurrentCode() is the body because nothing
+  // gave it a trampoline. Checked rather than assumed -- a trampoline here
+  // would be the defect this function exists to prevent.
+  if (!impl.HasCode()) return Code::null();
+  const auto& current = Code::Handle(zone, impl.CurrentCode());
+  if (IsTrampolineCode(thread, current.ptr())) return Code::null();
+  return current.ptr();
 }
 
 void MaotRegistry::NoteEscape(Thread* thread,
@@ -1330,10 +1376,17 @@ bool MaotRegistry::CommitStagedForTesting(Thread* thread,
   const auto& staged_fn = Function::Handle(zone,
       staged_impl.IsFunction() ? Function::Cast(staged_impl).ptr()
                                : Function::null());
-  SetFieldAt(thread, entry, kCurrentCode,
-             staged_fn.IsNull() || !staged_fn.HasCode()
-                 ? Object::null_object()
-                 : Object::Handle(zone, staged_fn.CurrentCode()));
+  // THE BODY, not CurrentCode(). Once #69 installs a trampoline, a selected
+  // declaration's Function::CurrentCode() IS that trampoline -- and the
+  // replacement is itself a selected declaration, so re-deriving the pin here
+  // stored AlphaNew's trampoline and produced
+  //   Alpha cell -> AlphaNew trampoline -> AlphaNew cell -> AlphaNew body,
+  // a second mutable declaration's cell silently interposed in Alpha's
+  // routing. RepinCurrentCode already refuses to re-derive for exactly this
+  // reason at compile time; the commit path did not.
+  const auto& staged_body =
+      Code::Handle(zone, PinnedBodyCodeFor(thread, staged_fn));
+  SetFieldAt(thread, entry, kCurrentCode, staged_body);
   // MAOT-3: this single store is the installation. Every precompiled call
   // site for this declaration loads the cell on every call, so the next
   // invocation reaches the new implementation -- without rewriting one byte
@@ -1347,17 +1400,25 @@ bool MaotRegistry::CommitStagedForTesting(Thread* thread,
     // trampoline branches through, so leaving it stale would let instance
     // dispatch keep executing the release body while direct calls moved --
     // which is the exact divergence #69 exists to close.
-    const auto& staged_fn_for_cell = Function::Handle(zone,
-        staged_impl.IsNull() ? Function::null()
-                             : Function::RawCast(staged_impl.ptr()));
-    const auto& next_code = Object::Handle(zone,
-        staged_fn_for_cell.IsNull() || !staged_fn_for_cell.HasCode()
-            ? Object::null()
-            : staged_fn_for_cell.CurrentCode());
+    const auto& next_code = staged_body;
+    if (next_code.IsNull()) {
+      // No pinned body for the replacement. Refuse: a cell with no executable
+      // half, or one filled from a trampoline, is worse than a refused
+      // install.
+      return false;
+    }
     if (CellCodeWouldSelfCycle(thread, entry, next_code)) {
       // Refuse rather than install a cell that makes its own trampoline
       // branch to itself. A replacement whose CurrentCode is a trampoline is
       // not an implementation body.
+      return false;
+    }
+    if (IsTrampolineCode(thread, next_code.ptr())) {
+      // ANY trampoline, not just this declaration's own. The self-cycle guard
+      // catches only `Alpha cell -> Alpha trampoline`; it cannot see
+      // `Alpha cell -> AlphaNew trampoline`, which is not a literal cycle but
+      // makes Alpha's behaviour depend on AlphaNew's cell. The answer is not
+      // graph-cycle detection -- it is that a cell never holds a trampoline.
       return false;
     }
     cell.SetAt(kCellImplFunction, staged_impl);

@@ -276,7 +276,27 @@ class MaotRegistry : public AllStatic {
 
   // The DeclarationId bound to `function`, or null when it is not a selected
   // Mutable-AOT declaration.
+  // DECLARATION identity, keyed on the entry's STABLE declaration Function.
+  //
+  // Not on kCurrentImpl: that field is intentionally mutable, so keying on it
+  // made a declaration stop being a declaration the moment it was installed
+  // over. Measured -- after one production install, DeclarationIdOf(Alpha.v)
+  // returned null and IsMutableDeclaration(Alpha.v) went false, so post-install
+  // runtime observations for that declaration silently stopped being recorded.
+  static intptr_t EntryForDeclarationFunction(Thread* thread,
+                                              const Function& function);
   static StringPtr DeclarationIdOf(Thread* thread, const Function& function);
+
+  // The other, genuinely different question: which declaration currently
+  // supplies this IMPLEMENTATION. Separately named on purpose -- one function
+  // answering both meanings is what produced the defect above.
+  static StringPtr DeclarationIdSuppliedBy(Thread* thread,
+                                           const Function& implementation);
+
+  // The pinned BODY Code for an implementation Function -- never
+  // Function::CurrentCode(), which is the declaration's trampoline once #69
+  // has installed one.
+  static CodePtr PinnedBodyCodeFor(Thread* thread, const Function& impl);
 
   // Records that one more indirect call site was emitted for `function`.
   static void NoteCallSiteEmitted(Thread* thread, const Function& function);
