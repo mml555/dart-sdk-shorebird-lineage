@@ -2806,11 +2806,22 @@ class CodeSerializationCluster : public SerializationCluster {
                      GrowableArray<CodeOrderInfo>* order_list,
                      IntMap<intptr_t>* order_map,
                      CodePtr code) {
+    // RAW first. The next line dereferences `code`, so a bad entry faults
+    // before anything identifies it. The setter crash is inside
+    // PrepareInstructions, whose first act is this sort.
+    MaotSerTrace("SORT insert idx=%" Pd " raw_code=%p\n", order_list->length(),
+                 reinterpret_cast<void*>(static_cast<uword>(code)));
     InstructionsPtr instr = code->untag()->instructions_;
     intptr_t key = static_cast<intptr_t>(instr);
     intptr_t instructions_id = 0;
 
     if (order_map->HasKey(key)) {
+      // Two Code objects sharing one Instructions. In precompiled mode the
+      // RELEASE_ASSERT below makes this fatal -- recorded first so the pair is
+      // identifiable rather than only the abort being visible.
+      MaotSerTrace("SORT DUPLICATE_INSTRUCTIONS raw_code=%p instr=%p\n",
+                   reinterpret_cast<void*>(static_cast<uword>(code)),
+                   reinterpret_cast<void*>(static_cast<uword>(instr)));
       // We are expected to merge code objects which point to the same
       // instructions in the precompiled mode.
       RELEASE_ASSERT(!FLAG_precompiled_mode);
@@ -2829,10 +2840,13 @@ class CodeSerializationCluster : public SerializationCluster {
   static void Sort(Serializer* s, GrowableArray<CodePtr>* codes) {
     GrowableArray<CodeOrderInfo> order_list;
     IntMap<intptr_t> order_map;
+    MaotSerTrace("SORT BEGIN codes=%" Pd "\n", codes->length());
     for (intptr_t i = 0; i < codes->length(); i++) {
       Insert(s, &order_list, &order_map, (*codes)[i]);
     }
+    MaotSerTrace("SORT INSERTED %" Pd "\n", order_list.length());
     order_list.Sort(CompareCodeOrderInfo);
+    MaotSerTrace("SORT SORTED\n");
     ASSERT(order_list.length() == codes->length());
     for (intptr_t i = 0; i < order_list.length(); i++) {
       (*codes)[i] = order_list[i].code;
