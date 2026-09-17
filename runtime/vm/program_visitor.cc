@@ -282,6 +282,26 @@ void ProgramVisitor::WalkProgram(Zone* zone,
         walker.AddToWorklist(code);
       }
     }
+
+    // MUTABLE-AOT (#69). The registry's pinned Code is in exactly the position
+    // the dispatch table entries above are in: reachable from nothing the walk
+    // already visits. A selected declaration's implementation BODY Code is
+    // held only by these pins once InstallMaotTrampolines makes the trampoline
+    // its CurrentCode, and WalkProgram reaches a Function's Code only through
+    // Function::CurrentCode().
+    //
+    // Without this, every CodeVisitor pass scheduled after installation
+    // silently skips declaration bodies. That was not hypothetical:
+    // Precompiler::ReplaceFunctionStaticCallEntries stopped binding their
+    // pc-relative static call entries, which kept a Function target and never
+    // received a Code target, and CodeRelocator then dereferenced the null --
+    // GetTarget's ASSERT(target_.IsCode()) is compiled out in a product build.
+    // Any mutable declaration whose body made a static call crashed
+    // gen_snapshot; one whose body made none serialized fine, which is why
+    // constant-returning fixtures never showed it.
+    MaotRegistry::ForEachPinnedCode(
+        Thread::Current(), zone,
+        [&](const Code& pinned) { walker.AddToWorklist(pinned); });
   }
 
   // Walk the program starting from any roots we added to the worklist.

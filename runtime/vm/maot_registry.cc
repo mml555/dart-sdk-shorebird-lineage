@@ -1088,6 +1088,32 @@ CodePtr MaotRegistry::TrampolineAt(Thread* thread, intptr_t entry) {
   return raw == Object::null() ? Code::null() : Code::RawCast(raw);
 }
 
+const MaotRegistry::EntryField MaotRegistry::kPinnedCodeFields[3] = {
+    kCurrentCode, kReleaseCode, kTrampolineCode};
+
+void MaotRegistry::ForEachPinnedCode(
+    Thread* thread,
+    Zone* zone,
+    const std::function<void(const Code&)>& visit) {
+  const intptr_t entries = Length(thread);
+  auto& code = Code::Handle(zone);
+  for (intptr_t i = 0; i < entries; i++) {
+    for (const auto field : kPinnedCodeFields) {
+      const auto& raw = Object::Handle(zone, FieldAt(thread, i, field));
+      if (raw.IsNull() || !raw.IsCode()) continue;
+      code ^= raw.ptr();
+      visit(code);
+    }
+    const auto& cell =
+        Array::Handle(zone, Array::RawCast(FieldAt(thread, i, kDispatchCell)));
+    if (cell.IsNull()) continue;
+    const auto& raw = Object::Handle(zone, cell.At(kCellImplCode));
+    if (raw.IsNull() || !raw.IsCode()) continue;
+    code ^= raw.ptr();
+    visit(code);
+  }
+}
+
 void MaotRegistry::CanonicalizeCodePins(
     Thread* thread,
     Zone* zone,
@@ -1095,13 +1121,8 @@ void MaotRegistry::CanonicalizeCodePins(
   const intptr_t entries = Length(thread);
   auto& code = Code::Handle(zone);
   auto& canonical = Code::Handle(zone);
-  // Every Code the registry pins. kCurrentCode and kReleaseCode are the
-  // descriptor's pins; the cell's Code half is what the #69 trampoline
-  // actually branches through, so leaving it non-canonical would route
-  // dispatch at a Code object the snapshot no longer contains.
-  const EntryField kPins[] = {kCurrentCode, kReleaseCode, kTrampolineCode};
   for (intptr_t i = 0; i < entries; i++) {
-    for (const auto field : kPins) {
+    for (const auto field : kPinnedCodeFields) {
       const auto& raw = Object::Handle(zone, FieldAt(thread, i, field));
       if (raw.IsNull() || !raw.IsCode()) continue;
       code ^= raw.ptr();
