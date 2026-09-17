@@ -1172,6 +1172,11 @@ intptr_t MaotRegistry::CallSiteCountFor(Thread* thread,
   return 0;
 }
 
+intptr_t MaotRegistry::CallSiteCountAt(Thread* thread, intptr_t entry) {
+  if (entry < 0 || entry >= Length(thread)) return -1;
+  return Smi::Value(Smi::RawCast(FieldAt(thread, entry, kCallSiteCount)));
+}
+
 void MaotRegistry::SetCallSiteCountFor(Thread* thread,
                                        const String& declaration_id,
                                        intptr_t count) {
