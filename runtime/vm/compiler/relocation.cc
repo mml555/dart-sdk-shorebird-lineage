@@ -83,6 +83,7 @@ CodeRelocator::CodeRelocator(Thread* thread,
 DECLARE_FLAG(bool, maot_trace_serializer);
 
 static FILE* g_maot_reloc_trace = nullptr;
+static intptr_t g_maot_reloc_code_ord = -1;
 
 static void MaotRelocTrace(const char* fmt, ...) {
   if (!FLAG_maot_trace_serializer) return;
@@ -110,6 +111,7 @@ void CodeRelocator::Relocate(bool is_vm_isolate) {
                  code_objects_->length(), is_vm_isolate ? 1 : 0);
   for (intptr_t i = 0; i < code_objects_->length(); ++i) {
     // RAW first, before any handle assignment dereferences it.
+    g_maot_reloc_code_ord = i;
     MaotRelocTrace("RELOC BEGIN %" Pd " raw=%p\n", i,
                    reinterpret_cast<void*>(
                        static_cast<uword>((*code_objects_)[i])));
@@ -257,6 +259,7 @@ void CodeRelocator::ScanCallTargets(const Code& code,
     return;
   }
   StaticCallsTable calls(call_targets);
+  intptr_t maot_call_ord = 0;
   for (auto call : calls) {
     kind_type_and_offset_ = call.Get<Code::kSCallTableKindAndOffset>();
     const auto kind = Code::KindField::decode(kind_type_and_offset_.Value());
@@ -265,11 +268,25 @@ void CodeRelocator::ScanCallTargets(const Code& code,
     const auto call_entry_point =
         Code::EntryPointField::decode(kind_type_and_offset_.Value());
 
+    // Per-call record BEFORE GetTarget resolves anything or the instruction
+    // pattern at PayloadStart()+offset is read.
+    MaotRelocTrace("    c%" Pd ".%" Pd " kind=%d return_pc_off=%" Pd
+                   " entry=%d\n",
+                   g_maot_reloc_code_ord, maot_call_ord,
+                   static_cast<int>(kind),
+                   static_cast<intptr_t>(return_pc_offset),
+                   static_cast<int>(call_entry_point));
+    maot_call_ord++;
+
     if (kind == Code::kCallViaCode) {
       continue;
     }
 
     destination_ = GetTarget(call);
+    MaotRelocTrace("    c%" Pd ".%" Pd " target=%p\n", g_maot_reloc_code_ord,
+                   maot_call_ord - 1,
+                   reinterpret_cast<void*>(
+                       static_cast<uword>(destination_.ptr())));
 
     // A call site can decide to jump not to the beginning of a function but
     // rather jump into it at a certain offset.
