@@ -8813,9 +8813,13 @@ void Serializer::PrepareInstructions(
 
     intptr_t length = 0;
     uint8_t* bytes = pc_mapping.Steal(&length);
+    MaotSerTrace("PREP bd.6 stolen length=%" Pd " ptr=%p\n", length,
+                 static_cast<void*>(bytes));
 
     instructions_table_rodata_offset_ =
         image_writer_->AddBytesToData(bytes, length);
+    MaotSerTrace("PREP bd.7 added_to_data offset=%" Pd "\n",
+                 instructions_table_rodata_offset_);
     // Attribute all bytes in this object to the root for simplicity.
     if (profile_writer_ != nullptr) {
       const auto offset_space = IdSpace::kIsolateData;
@@ -8825,6 +8829,7 @@ void Serializer::PrepareInstructions(
               "<instructions-table-rodata>"),
           {offset_space, instructions_table_rodata_offset_});
     }
+    MaotSerTrace("PREP bd.8 instructions_table_done\n");
   }
 #endif  // defined(DART_PRECOMPILER) && !defined(TARGET_ARCH_IA32)
 }
