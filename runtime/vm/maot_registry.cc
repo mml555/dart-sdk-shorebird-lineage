@@ -2483,7 +2483,12 @@ void MaotRegistry::ClassifyCodePointer(Thread* thread,
                                        intptr_t buf_len) {
   buf[0] = '\0';
   if (candidate == Object::null()) {
-    Utils::SNPrint(buf, buf_len, "null");
+    // Print the raw value alongside the verdict. A previous run reported
+    // "null" here while the caller printed the same expression as non-null on
+    // the same line, which cannot both be true -- so the value this function
+    // actually saw is recorded rather than assumed.
+    Utils::SNPrint(buf, buf_len, "null(saw=%p)",
+                   reinterpret_cast<void*>(static_cast<uword>(candidate)));
     return;
   }
   Zone* zone = thread->zone();
@@ -2531,7 +2536,9 @@ void MaotRegistry::ClassifyCodePointer(Thread* thread,
     if (written > buf_len - 128) break;
   }
   if (written == 0) {
-    Utils::SNPrint(buf, buf_len, "NO_REGISTRY_MATCH");
+    Utils::SNPrint(buf, buf_len, "NO_REGISTRY_MATCH(saw=%p,entries=%" Pd ")",
+                   reinterpret_cast<void*>(static_cast<uword>(candidate)),
+                   entries);
   }
 }
 
