@@ -7,6 +7,7 @@
 #include "vm/program_visitor.h"
 #include "vm/maot_registry.h"
 
+
 #include "vm/canonical_tables.h"
 #include "vm/closure_functions_cache.h"
 #include "vm/code_patcher.h"
@@ -299,6 +300,10 @@ void ProgramVisitor::WalkProgram(Zone* zone,
     // Any mutable declaration whose body made a static call crashed
     // gen_snapshot; one whose body made none serialized fine, which is why
     // constant-returning fixtures never showed it.
+    // The falsification flag is honoured INSIDE ForEachPinnedCode rather than
+    // here: program_visitor.cc is compiled into five library variants and
+    // maot_registry.cc into two, so naming the flag symbol at this call site
+    // fails to link in the variants that have no registry translation unit.
     MaotRegistry::ForEachPinnedCode(
         Thread::Current(), zone,
         [&](const Code& pinned) { walker.AddToWorklist(pinned); });

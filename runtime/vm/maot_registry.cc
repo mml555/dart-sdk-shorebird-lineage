@@ -75,6 +75,25 @@ DEFINE_FLAG(charp,
             "measured rather than argued from the enum.");
 
 DEFINE_FLAG(bool,
+            maot_disable_pinned_body_roots,
+            false,
+            "FALSIFICATION ONLY. Stop adding the registry's pinned Code to "
+            "ProgramVisitor::WalkProgram, restoring the defect where a "
+            "declaration body leaves program traversal as soon as its "
+            "trampoline becomes CurrentCode. Exists so the traversal "
+            "regression has a negative control: a check that cannot fail "
+            "proves nothing.");
+
+DEFINE_FLAG(bool,
+            maot_verify_pinned_body_traversal,
+            false,
+            "Structural regression for the root-enumeration defect. Verifies "
+            "that after trampoline installation every registry-pinned "
+            "implementation body is still reached by the program walk exactly "
+            "once and still has its static calls bound. Guards the whole class "
+            "rather than the list of passes that happened to be affected.");
+
+DEFINE_FLAG(bool,
             maot_install_trampolines,
             false,
             "MAOT-5 (#69), OFF by default. Install a dispatch trampoline as "
@@ -1095,6 +1114,10 @@ void MaotRegistry::ForEachPinnedCode(
     Thread* thread,
     Zone* zone,
     const std::function<void(const Code&)>& visit) {
+  // Falsification control lives here, not at the call site in
+  // ProgramVisitor::WalkProgram: that file is compiled into more library
+  // variants than this one, so referencing the flag there does not link.
+  if (FLAG_maot_disable_pinned_body_roots) return;
   const intptr_t entries = Length(thread);
   auto& code = Code::Handle(zone);
   for (intptr_t i = 0; i < entries; i++) {

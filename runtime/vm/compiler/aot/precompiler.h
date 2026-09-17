@@ -354,6 +354,7 @@ class Precompiler : public ValueObject {
   void TraceForRetainedFunctions();
   void FinalizeDispatchTable();
   void ReplaceFunctionStaticCallEntries();
+  void VerifyPinnedBodyTraversal();
   void DropFunctions();
   void DropFields();
   void VisitConstantInstance(ObjectPtr instance,
