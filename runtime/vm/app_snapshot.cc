@@ -9171,7 +9171,19 @@ ZoneGrowableArray<Object*>* Serializer::Serialize(SerializationRoots* roots) {
 #endif
   }
 
+  // Bracketed. Four times now the last successful line has turned out to be a
+  // COMPLETED loop rather than the fault site, so the cluster loop finishing
+  // is not evidence that the fault is in the next cluster -- it is evidence
+  // the fault is here. The MaotRegistry is rooted in the ObjectStore, which
+  // root writing traverses, so this is where a bad registry-held pointer
+  // would first be dereferenced.
+  if (FLAG_print_cluster_information) {
+    OS::PrintErr("Snapshot: BEGIN WriteRoots\n");
+  }
   roots->WriteRoots(this);
+  if (FLAG_print_cluster_information) {
+    OS::PrintErr("Snapshot: END WriteRoots\n");
+  }
 
 #if defined(DEBUG)
   Write<int32_t>(kSectionMarker);
