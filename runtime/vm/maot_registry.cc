@@ -2439,8 +2439,12 @@ MAOT_TEST_EXPORT int64_t Dart_MaotTrampolineIdentityForTesting(
 // Counters are unconditional and cheap; decision RECORDS are capped, because
 // a handful is all the evidence dump needs. The counter is what the
 // no-cache-mutation proof samples, so it must stay exact.
-static constexpr intptr_t kMaotSwitchableStates = 6;
+static constexpr intptr_t kMaotSwitchableStates = 7;
 static constexpr intptr_t kMaotStateRecordCap = 8;
+// The 7th name is tallied BEFORE any filter, so that "this site never reached
+// the switchable-call miss handler" can be told apart from "it reached it with
+// a target we do not track". Those are different facts and a per-declaration
+// counter of zero cannot distinguish them.
 static const char* const kMaotStateNames[kMaotSwitchableStates] = {
     "instance-dispatch/UnlinkedCall-observed",
     "instance-dispatch/monomorphic-observed",
@@ -2448,6 +2452,7 @@ static const char* const kMaotStateNames[kMaotSwitchableStates] = {
     "instance-dispatch/SingleTargetCache-observed",
     "instance-dispatch/ICData-observed",
     "instance-dispatch/MegamorphicCache-observed",
+    "any-dispatch/miss-observed",
 };
 static RelaxedAtomic<intptr_t> g_maot_state_hits[kMaotSwitchableStates] = {
     {0}, {0}, {0}, {0}, {0}, {0}};

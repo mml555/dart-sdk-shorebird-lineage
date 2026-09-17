@@ -3601,6 +3601,13 @@ void PatchableCallHandler::ResolveSwitchAndReturn(const Object& old_data) {
 static void MaotNoteSwitchableState(Thread* thread,
                                     const Function& target,
                                     const char* state) {
+  // Unconditional, before every filter below. A per-declaration count of zero
+  // is ambiguous: it means either that this call site never reached the
+  // switchable-call miss handler, or that it did and the target was not a
+  // mutable declaration. Those demand different conclusions -- the first says
+  // the site uses some other dispatch form and is therefore unproven, the
+  // second says the instrumentation is simply not interested in it.
+  MaotRegistry::NoteSwitchableStateHit("any-dispatch/miss-observed", true);
   if (target.IsNull()) return;
   if (!MaotRegistry::IsMutableDeclaration(thread, target)) return;
   Zone* zone = thread->zone();
