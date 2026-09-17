@@ -829,7 +829,17 @@ void Precompiler::DoCompileAll() {
     // does not yet exist.
     RepinMutableAotImplementations();
 
+    // Bracketed so a crash between these two prints is located rather than
+    // guessed at. A setter trampoline faults somewhere after Repin, and the
+    // difference between "in PruneDictionaries" and "after it, in
+    // serialization" changes which subsystem owns the defect.
+    if (FLAG_maot_trace_serializer) {
+      OS::PrintErr("[maot] >>> entering PruneDictionaries\n");
+    }
     PruneDictionaries();
+    if (FLAG_maot_trace_serializer) {
+      OS::PrintErr("[maot] <<< PruneDictionaries returned\n");
+    }
 
     if (retained_reasons_writer_ != nullptr) {
       reasons_writer.Write();
