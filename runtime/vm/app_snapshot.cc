@@ -8481,18 +8481,27 @@ void Serializer::PrepareInstructions(
         }
       }
     }
+    // END for the BEGIN above. Its absence made "BEGIN with no END" read as
+    // "faulted inside the scan", which it never established -- it only showed
+    // that execution reached the BEGIN.
+    MaotSerTrace("PREP END stackmap_scan total=%u maps=%" Pd "\n", total,
+                 stack_maps.length());
     ASSERT(static_cast<intptr_t>(total) == code_index_.Length());
     instructions_table_len_ = not_discarded_count;
 
     // Sort stack maps by usage so that most commonly used stack maps are
     // together at the start of the Data object.
+    MaotSerTrace("PREP BEGIN stackmap_sort maps=%" Pd "\n", stack_maps.length());
     stack_maps.Sort([](StackMapInfo* const* a, StackMapInfo* const* b) {
       if ((*a)->use_count < (*b)->use_count) return 1;
       if ((*a)->use_count > (*b)->use_count) return -1;
       return 0;
     });
 
+    MaotSerTrace("PREP END stackmap_sort\n");
+
     // Build Data object.
+    MaotSerTrace("PREP BEGIN build_data\n");
     MallocWriteStream pc_mapping(4 * KB);
 
     // Write the header out.
