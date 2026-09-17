@@ -8783,7 +8783,10 @@ ZoneGrowableArray<Object*>* Serializer::Serialize(SerializationRoots* roots) {
   // before any cluster fill begins, so it is in one of these phases -- and the
   // trace loop is where a stale pointer held by a ROOTED object would first be
   // dereferenced, which is the remaining structural candidate.
-  MaotSerTrace("PASS vm=%d BEGIN AddBaseObjects\n", is_vm_isolate() ? 1 : 0);
+  // No pass label: Serializer has no is_vm_isolate accessor, and the two
+  // passes are already distinguishable by order -- the first PASS block is
+  // the VM snapshot, the second the program snapshot.
+  MaotSerTrace("PASS BEGIN AddBaseObjects\n");
   roots->AddBaseObjects(this);
   MaotSerTrace("PASS END AddBaseObjects\n");
 
