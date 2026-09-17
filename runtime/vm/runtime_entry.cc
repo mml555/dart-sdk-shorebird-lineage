@@ -2778,6 +2778,9 @@ class PatchableCallHandler {
 };
 
 #if defined(DART_PRECOMPILED_RUNTIME)
+// Defined below, next to the switchable-state recorder that shares it.
+static FunctionPtr MaotResolveForwarder(Zone* zone, const Function& target);
+
 void PatchableCallHandler::DoUnlinkedCallAOT(const UnlinkedCall& unlinked,
                                              const Function& target_function) {
   const auto& ic_data = ICData::Handle(
@@ -2821,7 +2824,18 @@ void PatchableCallHandler::DoUnlinkedCallAOT(const UnlinkedCall& unlinked,
   //   kMonomorphicSmiableCallCid  -> MonomorphicSmiableCall (flag false)
   //   kICDataCid                  -> straight to the IC stub (no target, or
   //                                  the target needs an args descriptor)
-  if (MaotRegistry::IsMutableDeclaration(thread_, target_function)) {
+  // Same forwarder resolution as MaotNoteSwitchableState, and for the same
+  // reason: a dynamic call to a member with a typed parameter arrives here as
+  // that member's dynamic invocation forwarder, which the registry does not
+  // recognise. Without this the site is never remembered and the inspector
+  // reports -1 for exactly the members that have a parameter -- setter,
+  // operator, callable call -- while a no-argument getter works.
+  //
+  // OBSERVATION ONLY: target_function itself is untouched, so what gets
+  // dispatched and what gets patched below are unchanged.
+  const Function& observed_target = Function::Handle(
+      zone_, MaotResolveForwarder(zone_, target_function));
+  if (MaotRegistry::IsMutableDeclaration(thread_, observed_target)) {
     MaotRegistry::NoteUnlinkedTransition(
         unlinked.can_patch_to_monomorphic(),
         static_cast<intptr_t>(object.GetClassId()));
@@ -2843,7 +2857,7 @@ void PatchableCallHandler::DoUnlinkedCallAOT(const UnlinkedCall& unlinked,
       // read back off the installed object rather than re-derived from the
       // target function.
       const uword tramp_entry =
-          MaotRegistry::DeclarationTrampolineEntry(thread_, target_function);
+          MaotRegistry::DeclarationTrampolineEntry(thread_, observed_target);
       uword stored_entry = 0;
       intptr_t expected_cid = -1;
       if (object.IsMonomorphicSmiableCall()) {
@@ -2870,7 +2884,7 @@ void PatchableCallHandler::DoUnlinkedCallAOT(const UnlinkedCall& unlinked,
       MaotRegistry::NoteDecision(
           thread_,
           String::Handle(zone_, MaotRegistry::DeclarationIdOf(thread_,
-                                                              target_function)),
+                                                              observed_target)),
           String::Handle(zone_, String::New("<runtime-dispatch>", Heap::kOld)),
           "instance-dispatch/UnlinkedCall-transition", buf,
           MaotRegistry::kSlotPreserving);
@@ -3391,9 +3405,36 @@ void PatchableCallHandler::ResolveSwitchAndReturn(const Object& old_data) {
 // selected declaration that IS the trampoline -- so comparing the stored code
 // against the registry's trampoline answers it without inferring one state
 // from another.
+// A dynamic call to a member with a typed parameter resolves to the VM's
+// DYNAMIC INVOCATION FORWARDER, not to the member. The forwarder type-checks
+// the arguments and then calls the member; disassembly of
+// `Alpha_dyn_set_v` shows its tail is the #67 cell indirection itself --
+// pool[cell] -> cell[implFunction] -> blr entry_point -- so it caches no
+// implementation identity and re-reads the cell on every call.
+//
+// The registry is keyed on the member, so a forwarder arriving here is not
+// recognised and nothing is attributed. That is why a setter, an `operator +`
+// and a `call()` recorded zero observed states while a no-argument getter,
+// which needs no forwarder, recorded them normally.
+//
+// Resolved for OBSERVATION ONLY. MaotRegistry::IsMutableDeclaration is left
+// alone because installation policy and inlining refusal also consult it, and
+// widening what counts as a declaration there would change decisions, not just
+// what gets watched.
+static FunctionPtr MaotResolveForwarder(Zone* zone, const Function& target) {
+  if (target.IsNull() || !target.IsDynamicInvocationForwarder()) {
+    return target.ptr();
+  }
+  const auto& forwarded = Function::Handle(zone, target.ForwardingTarget());
+  return forwarded.IsNull() ? target.ptr() : forwarded.ptr();
+}
+
 static void MaotNoteSwitchableState(Thread* thread,
-                                    const Function& target,
+                                    const Function& raw_target,
                                     const char* state) {
+  const Function& target =
+      Function::Handle(thread->zone(),
+                       MaotResolveForwarder(thread->zone(), raw_target));
   // Unconditional, before every filter below. A per-declaration count of zero
   // is ambiguous: it means either that this call site never reached the
   // switchable-call miss handler, or that it did and the target was not a
