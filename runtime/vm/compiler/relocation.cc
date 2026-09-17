@@ -3,6 +3,7 @@
 // BSD-style license that can be found in the LICENSE file.
 
 #include "vm/compiler/relocation.h"
+#include "vm/maot_registry.h"
 
 #include "vm/code_patcher.h"
 #include "vm/heap/pages.h"
@@ -76,6 +77,26 @@ CodeRelocator::CodeRelocator(Thread* thread,
       target_(Object::Handle(thread->zone())),
       destination_(Code::Handle(thread->zone())) {}
 
+// MAOT-5 (#69) diagnostic. File-backed and flushed per line: the setter
+// trampoline crash happens inside this function, and stderr can be lost when
+// the process dies mid-write.
+DECLARE_FLAG(bool, maot_trace_serializer);
+
+static FILE* g_maot_reloc_trace = nullptr;
+
+static void MaotRelocTrace(const char* fmt, ...) {
+  if (!FLAG_maot_trace_serializer) return;
+  if (g_maot_reloc_trace == nullptr) {
+    g_maot_reloc_trace = fopen("/tmp/maot_reloc_trace.txt", "a");
+    if (g_maot_reloc_trace == nullptr) return;
+  }
+  va_list args;
+  va_start(args, fmt);
+  vfprintf(g_maot_reloc_trace, fmt, args);
+  va_end(args);
+  fflush(g_maot_reloc_trace);
+}
+
 void CodeRelocator::Relocate() {
   Zone* zone = Thread::Current()->zone();
   auto& current_caller = Code::Handle(zone);
@@ -85,19 +106,38 @@ void CodeRelocator::Relocate() {
   auto& next_caller_targets = Array::Handle(zone);
 
   // Emit all instructions and do relocations on the way.
+  MaotRelocTrace("RELOC LOOP BEGIN n=%" Pd "\n",
+                 code_objects_->length());
   for (intptr_t i = 0; i < code_objects_->length(); ++i) {
+    // RAW first, before any handle assignment dereferences it.
+    MaotRelocTrace("RELOC BEGIN %" Pd " raw=%p\n", i,
+                   reinterpret_cast<void*>(
+                       static_cast<uword>((*code_objects_)[i])));
     current_caller = (*code_objects_)[i];
+    MaotRelocTrace("  r%" Pd " instr=%p tramp=%d\n", i,
+                   reinterpret_cast<void*>(static_cast<uword>(
+                       current_caller.instructions())),
+                   MaotRegistry::IsTrampolineCode(Thread::Current(),
+                                                  current_caller.ptr())
+                       ? 1
+                       : 0);
 
     intptr_t code_text_offset;
     if (!AddInstructionsToText(current_caller.ptr(), &code_text_offset)) {
+      MaotRelocTrace("  r%" Pd " SKIPPED (not added to text)\n", i);
       continue;
     }
+    MaotRelocTrace("  r%" Pd " text_offset=%" Pd "\n", i, code_text_offset);
 
     call_targets = current_caller.static_calls_target_table();
+    MaotRelocTrace("  r%" Pd " call_targets=%s BEGIN ScanCallTargets\n", i,
+                   call_targets.IsNull() ? "null" : "present");
     ScanCallTargets(current_caller, call_targets, code_text_offset);
+    MaotRelocTrace("  r%" Pd " END ScanCallTargets\n", i);
 
     // Any unresolved calls to this instruction can be fixed now.
     ResolveUnresolvedCallsTargeting(current_caller.instructions());
+    MaotRelocTrace("RELOC END %" Pd "\n", i);
 
     // If we have forward/backwards calls which are almost out-of-range, we'll
     // create trampolines now.
