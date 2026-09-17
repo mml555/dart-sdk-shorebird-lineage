@@ -2489,8 +2489,38 @@ MAOT_TEST_EXPORT int64_t Dart_MaotInspectSwitchableSite(
               cache.filled_entry_count());
     }
     if (!found) {
-      fprintf(f, "site=0x%" Px " state=MegamorphicCache NO ENTRY for %s\n", pc,
-              declaration_id);
+      // "No entry for this declaration" is not a finding on its own -- the
+      // entry may have been rewritten to hold a DIFFERENT declaration's
+      // Function, which is a very different fact from the entry being
+      // evicted. So dump every occupied bucket rather than report an absence.
+      fprintf(f,
+              "site=0x%" Px " state=MegamorphicCache NO ENTRY for %s "
+              "filled_entries=%" Pd " -- full contents follow\n",
+              pc, declaration_id, cache.filled_entry_count());
+      for (intptr_t i = 0; i <= mask; i++) {
+        cid_smi = buckets.At(i * MegamorphicCache::kEntryLength +
+                             MegamorphicCache::kClassIdIndex);
+        target = buckets.At(i * MegamorphicCache::kEntryLength +
+                            MegamorphicCache::kTargetFunctionIndex);
+        if (!target.IsFunction()) continue;
+        const auto& fn = Function::Cast(target);
+        tid = MaotRegistry::DeclarationIdOf(thread, fn);
+        const auto& owner = Class::Handle(zone, fn.Owner());
+        const auto& owner_name = String::Handle(
+            zone, owner.IsNull() ? String::null() : owner.Name());
+        const auto& cur =
+            Code::Handle(zone, fn.HasCode() ? fn.CurrentCode() : Code::null());
+        fprintf(f,
+                "    bucket cid=%s owner=%s decl=%s fn_addr=%p "
+                "CurrentCode_IS_trampoline=%s\n",
+                cid_smi.ToCString(),
+                owner_name.IsNull() ? "<null>" : owner_name.ToCString(),
+                tid.IsNull() ? "<none>" : tid.ToCString(),
+                reinterpret_cast<void*>(static_cast<uword>(fn.ptr())),
+                (!tramp.IsNull() && !cur.IsNull() && cur.ptr() == tramp.ptr())
+                    ? "YES"
+                    : "NO");
+      }
     }
     fclose(f);
     return 0;
