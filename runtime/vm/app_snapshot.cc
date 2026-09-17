@@ -8779,11 +8779,19 @@ ZoneGrowableArray<Object*>* Serializer::Serialize(SerializationRoots* roots) {
   // set up a scope to ensure proper flushing to the profile.
   Serializer::WritingObjectScope scope(
       this, V8SnapshotProfileWriter::kArtificialRootId);
+  // Phase brackets. The setter crash happens in the SECOND serialization pass
+  // before any cluster fill begins, so it is in one of these phases -- and the
+  // trace loop is where a stale pointer held by a ROOTED object would first be
+  // dereferenced, which is the remaining structural candidate.
+  MaotSerTrace("PASS vm=%d BEGIN AddBaseObjects\n", is_vm_isolate() ? 1 : 0);
   roots->AddBaseObjects(this);
+  MaotSerTrace("PASS END AddBaseObjects\n");
 
   NoSafepointScope no_safepoint;
 
+  MaotSerTrace("PASS BEGIN PushRoots\n");
   roots->PushRoots(this);
+  MaotSerTrace("PASS END PushRoots stack=%" Pd "\n", stack_.length());
 
   // Resolving WeakSerializationReferences and WeakProperties may cause new
   // objects to be pushed on the stack, and handling the changes to the stack
@@ -8831,6 +8839,8 @@ ZoneGrowableArray<Object*>* Serializer::Serialize(SerializationRoots* roots) {
   }
   ASSERT(clusters_by_cid_[kWeakSerializationReferenceCid] == nullptr);
 #endif
+
+  MaotSerTrace("PASS END TraceLoop\n");
 
   code_cluster_ = CID_CLUSTER(Code);
 
