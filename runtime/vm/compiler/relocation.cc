@@ -116,13 +116,24 @@ void CodeRelocator::Relocate() {
                    reinterpret_cast<void*>(
                        static_cast<uword>((*code_objects_)[i])));
     current_caller = (*code_objects_)[i];
-    MaotRelocTrace("  r%" Pd " instr=%p tramp=%d\n", i,
-                   reinterpret_cast<void*>(static_cast<uword>(
-                       current_caller.instructions())),
-                   MaotRegistry::IsTrampolineCode(Thread::Current(),
-                                                  current_caller.ptr())
-                       ? 1
-                       : 0);
+    {
+      // Source identity. current_caller is known-good here: it has already
+      // been assigned and its instructions read without fault.
+      const auto& owner = Object::Handle(current_caller.owner());
+      MaotRelocTrace(
+          "  r%" Pd " instr=%p tramp=%d owner=%p owner_desc=%s\n", i,
+          reinterpret_cast<void*>(
+              static_cast<uword>(current_caller.instructions())),
+          MaotRegistry::IsTrampolineCode(Thread::Current(),
+                                         current_caller.ptr())
+              ? 1
+              : 0,
+          reinterpret_cast<void*>(static_cast<uword>(owner.ptr())),
+          owner.IsNull() ? "<null>"
+                         : (owner.IsFunction()
+                                ? Function::Cast(owner).ToFullyQualifiedCString()
+                                : owner.ToCString()));
+    }
 
     intptr_t code_text_offset;
     if (!AddInstructionsToText(current_caller.ptr(), &code_text_offset)) {
@@ -283,10 +294,19 @@ void CodeRelocator::ScanCallTargets(const Code& code,
     }
 
     destination_ = GetTarget(call);
-    MaotRelocTrace("    c%" Pd ".%" Pd " target=%p\n", g_maot_reloc_code_ord,
-                   maot_call_ord - 1,
-                   reinterpret_cast<void*>(
-                       static_cast<uword>(destination_.ptr())));
+    {
+      // Destination provenance BEFORE anything derived from instructions_ is
+      // touched. The classifier compares pointers only and never dereferences
+      // the candidate.
+      char cls[512];
+      MaotRegistry::ClassifyCodePointer(Thread::Current(), destination_.ptr(),
+                                        cls, sizeof(cls));
+      MaotRelocTrace("    c%" Pd ".%" Pd " target=%p registry=%s\n",
+                     g_maot_reloc_code_ord, maot_call_ord - 1,
+                     reinterpret_cast<void*>(
+                         static_cast<uword>(destination_.ptr())),
+                     cls);
+    }
 
     // A call site can decide to jump not to the beginning of a function but
     // rather jump into it at a certain offset.
