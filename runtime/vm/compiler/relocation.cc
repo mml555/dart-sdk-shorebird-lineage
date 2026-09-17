@@ -293,6 +293,8 @@ void CodeRelocator::ScanCallTargets(const Code& code,
     int32_t offset_into_target = 0;
     bool is_tail_call;
     intptr_t call_instruction_offset;
+    MaotRelocTrace("    c%" Pd ".%" Pd " STEP1 pattern_read\n",
+                   g_maot_reloc_code_ord, maot_call_ord - 1);
     if (kind == Code::kPcRelativeCall || kind == Code::kPcRelativeTTSCall) {
       call_instruction_offset =
           return_pc_offset - PcRelativeCallPattern::kLengthInBytes;
@@ -311,10 +313,17 @@ void CodeRelocator::ScanCallTargets(const Code& code,
       is_tail_call = true;
     }
 
+    MaotRelocTrace("    c%" Pd ".%" Pd " STEP2 dest_payload dist=%d\n",
+                   g_maot_reloc_code_ord, maot_call_ord - 1, offset_into_target);
     const uword destination_payload = destination_.PayloadStart();
+    MaotRelocTrace("    c%" Pd ".%" Pd " STEP3 entry_point payload=0x%" Px "\n",
+                   g_maot_reloc_code_ord, maot_call_ord - 1,
+                   destination_payload);
     const uword entry_point = call_entry_point == Code::kUncheckedEntry
                                   ? destination_.UncheckedEntryPoint()
                                   : destination_.EntryPoint();
+    MaotRelocTrace("    c%" Pd ".%" Pd " STEP4 resolve entry=0x%" Px "\n",
+                   g_maot_reloc_code_ord, maot_call_ord - 1, entry_point);
 
     offset_into_target += (entry_point - destination_payload);
 
@@ -327,6 +336,8 @@ void CodeRelocator::ScanCallTargets(const Code& code,
     if (!TryResolveBackwardsCall(&unresolved_call)) {
       EnqueueUnresolvedCall(new UnresolvedCall(unresolved_call));
     }
+    MaotRelocTrace("    c%" Pd ".%" Pd " STEP5 done\n", g_maot_reloc_code_ord,
+                   maot_call_ord - 1);
   }
 }
 
