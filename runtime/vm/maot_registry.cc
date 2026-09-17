@@ -2176,6 +2176,62 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
         writer.PrintPropertyBool(
             "dispatch_cell_code_equals_impl_current_code_raw",
             cell_code.ptr() == impl_current_code.ptr());
+
+        // MAOT-5 (#69) ROUTING IDENTITIES.
+        //
+        // Names and sizes cannot carry the acceptance condition. What has to
+        // hold across a replacement is that specific OBJECTS do not move: the
+        // declaration Function, its trampoline Code and that trampoline's
+        // entrypoint stay put while the cell's implementation halves change.
+        // Two different Functions print the same name, and two different Code
+        // objects print the same size, so identity is recorded as the address
+        // and compared as an address.
+        //
+        // Addresses are only comparable WITHIN one process. These are written
+        // to compare baseline/V2/V3 dumps from a single run, never across
+        // runs, and the compaction-free precompiled heap is what makes them
+        // stable for that window.
+        const auto& decl_fn =
+            Object::Handle(zone, FieldAt(thread, i, kReleaseImpl));
+        const auto& tramp_code =
+            Object::Handle(zone, FieldAt(thread, i, kTrampolineCode));
+        const auto& release_body =
+            Object::Handle(zone, FieldAt(thread, i, kReleaseCode));
+        const auto& decl_fn_fn = Function::Handle(zone,
+            decl_fn.IsNull() ? Function::null()
+                             : Function::RawCast(decl_fn.ptr()));
+        writer.PrintProperty64(
+            "id_declaration_function",
+            static_cast<int64_t>(static_cast<uword>(decl_fn.ptr())));
+        writer.PrintProperty64(
+            "id_declaration_current_code",
+            static_cast<int64_t>(static_cast<uword>(
+                decl_fn_fn.IsNull() || !decl_fn_fn.HasCode()
+                    ? Code::null()
+                    : decl_fn_fn.CurrentCode())));
+        writer.PrintProperty64(
+            "id_trampoline_code",
+            static_cast<int64_t>(static_cast<uword>(tramp_code.ptr())));
+        writer.PrintProperty64(
+            "id_trampoline_entry",
+            static_cast<int64_t>(
+                tramp_code.IsNull() ? 0
+                                    : Code::Cast(tramp_code).EntryPoint()));
+        writer.PrintProperty64(
+            "id_cell_impl_function",
+            static_cast<int64_t>(static_cast<uword>(in_cell.ptr())));
+        writer.PrintProperty64(
+            "id_cell_impl_code",
+            static_cast<int64_t>(static_cast<uword>(cell_code.ptr())));
+        writer.PrintProperty64(
+            "id_pinned_current_body",
+            static_cast<int64_t>(static_cast<uword>(pinned_body.ptr())));
+        writer.PrintProperty64(
+            "id_release_body",
+            static_cast<int64_t>(static_cast<uword>(release_body.ptr())));
+        writer.PrintProperty64(
+            "id_dispatch_cell",
+            static_cast<int64_t>(static_cast<uword>(cell.ptr())));
       }
       writer.PrintPropertyBool(
           "current_implementation_is_the_declaration_itself",
