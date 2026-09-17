@@ -2434,16 +2434,37 @@ MAOT_TEST_EXPORT int64_t Dart_MaotInspectSwitchableSite(
   }
   uword stored = 0;
   intptr_t expected_cid = -1;
+  intptr_t lower = -1, upper = -1;
+  const char* target_is_tramp = "n/a";
   if (data.IsMonomorphicSmiableCall()) {
     stored = MonomorphicSmiableCall::Cast(data).entrypoint();
     expected_cid = MonomorphicSmiableCall::Cast(data).expected_cid();
+  } else if (data.IsSingleTargetCache()) {
+    // This state freezes BOTH a real Code pointer and a raw entry point, so
+    // both are reported: a raw address that matches while the Code pointer
+    // does not would mean something quite different from convergence.
+    const auto& stc = SingleTargetCache::Cast(data);
+    stored = stc.entry_point();
+    lower = stc.lower_limit();
+    upper = stc.upper_limit();
+    const auto& target = Code::Handle(zone, stc.target());
+    if (entry >= 0) {
+      const auto& tramp =
+          Code::Handle(zone, MaotRegistry::TrampolineAt(thread, entry));
+      target_is_tramp = (!tramp.IsNull() && !target.IsNull() &&
+                         target.ptr() == tramp.ptr())
+                            ? "YES"
+                            : "NO";
+    }
   }
   fprintf(f,
-          "site=0x%" Px " state=%s expected_cid=%" Pd " stored_entry=0x%" Px
-          " trampoline_entry=0x%" Px " equal=%s\n",
-          pc, data.IsNull() ? "<null>" : data.ToCString(), expected_cid, stored,
-          tramp_entry,
-          (tramp_entry != 0 && stored == tramp_entry) ? "YES" : "NO");
+          "site=0x%" Px " state=%s expected_cid=%" Pd " cid_range=[%" Pd
+          ",%" Pd "] stored_entry=0x%" Px " trampoline_entry=0x%" Px
+          " entry_equal=%s target_code_IS_trampoline=%s\n",
+          pc, data.IsNull() ? "<null>" : data.ToCString(), expected_cid, lower,
+          upper, stored, tramp_entry,
+          (tramp_entry != 0 && stored == tramp_entry) ? "YES" : "NO",
+          target_is_tramp);
   fclose(f);
   return 0;
 }
