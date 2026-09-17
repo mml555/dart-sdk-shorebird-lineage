@@ -1824,6 +1824,23 @@ void Precompiler::SeedMutableAotRoots() {
           // recorded. What it froze was the indirection, not the
           // implementation, so it never needs invalidating.
           "dynamic/MonomorphicSmiableCall",
+          // Freezes BOTH a Code pointer and a raw entry word, and both were
+          // read: across the warm and three replacements the site held the
+          // same cache with cid range [233,234], its stored entry equal to the
+          // declaration trampoline's entry AND its stored Code identically
+          // that trampoline, with no new miss. Both inherited receivers
+          // followed the replacements through the one shared cache and an
+          // unrelated override did not move.
+          //
+          // The range widened during cache FORMATION ([233,233] -> [233,234])
+          // and not during any replacement, which is why the invariance
+          // window starts after the warm rather than at first touch.
+          //
+          // Reaching it at all required the receiver set to be statically wide
+          // and runtime narrow: the same-inherited-Function condition the
+          // cache needs is the condition that otherwise lets TFA devirtualise
+          // the site away onto #67's static route.
+          "dynamic/SingleTargetCache",
       };
       for (const char* form : kProvenForms) {
         MaotRegistry::NoteDecision(
@@ -1839,7 +1856,6 @@ void Precompiler::SeedMutableAotRoots() {
       // safe: MonomorphicSmiableCall, SingleTargetCache and MegamorphicCache
       // were never entered by any fixture, and not observed is not disproven.
       static const char* const kUnprovenForms[] = {
-          "dynamic/SingleTargetCache",
           "dynamic/MegamorphicCache",
       };
       for (const char* form : kUnprovenForms) {
