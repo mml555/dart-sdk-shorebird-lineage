@@ -3294,6 +3294,23 @@ void Precompiler::ReplaceFunctionStaticCallEntries() {
     void VisitCode(const Code& code) {
       if (!code.IsFunctionCode()) return;
       maot_codes_visited++;
+      // MAOT-5 (#69). Which Code of a mutable declaration does this pass
+      // actually reach -- the body, or the trampoline that replaced it as
+      // CurrentCode? Counting entries can only imply the answer; this
+      // observes it.
+      if (FLAG_maot_trace_serializer) {
+        Thread* const thread = Thread::Current();
+        const auto& owner_fn = Function::Handle(code.function());
+        if (!owner_fn.IsNull() &&
+            MaotRegistry::IsMutableDeclaration(thread, owner_fn)) {
+          table_ = code.static_calls_target_table();
+          OS::PrintErr("[maot] BIND_VISIT owner=%s tramp=%d entries=%" Pd "\n",
+                       owner_fn.ToFullyQualifiedCString(),
+                       MaotRegistry::IsTrampolineCode(thread, code.ptr()) ? 1
+                                                                         : 0,
+                       table_.IsNull() ? -1 : table_.Length());
+        }
+      }
       table_ = code.static_calls_target_table();
       StaticCallsTable static_calls(table_);
 
