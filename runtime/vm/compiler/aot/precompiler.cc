@@ -162,6 +162,7 @@ namespace {
 
 }  // namespace
 
+DECLARE_FLAG(bool, maot_verify_pinned_body_traversal);
 DECLARE_FLAG(bool, print_flow_graph);
 DECLARE_FLAG(bool, print_flow_graph_optimized);
 DECLARE_FLAG(bool, trace_compiler);
@@ -847,6 +848,10 @@ void Precompiler::DoCompileAll() {
     if (FLAG_maot_trace_serializer) {
       OS::PrintErr("[maot] >>> entering PruneDictionaries\n");
     }
+    // After every rewriting and dedup pass, so the check sees the program the
+    // serializer will.
+    VerifyPinnedBodyTraversal();
+
     PruneDictionaries();
     if (FLAG_maot_trace_serializer) {
       OS::PrintErr("[maot] <<< PruneDictionaries returned\n");
@@ -3413,6 +3418,106 @@ void Precompiler::ReplaceFunctionStaticCallEntries() {
                  visitor.maot_entries_null_fn, visitor.maot_entries_left_empty,
                  visitor.maot_entries_bound);
   }
+}
+
+// MAOT-5 (#69). Structural regression for the root-enumeration defect.
+//
+// The defect was not "ReplaceFunctionStaticCallEntries has a bug". It was that
+// a declaration's implementation body STOPPED BEING A ProgramVisitor ROOT the
+// moment its trampoline became CurrentCode, which blinded every CodeVisitor
+// pass scheduled after installation at once. Only the static-call binder
+// crashed; the rest failed quietly, which is worse.
+//
+// So the guard belongs at that abstraction boundary rather than as one test
+// per downstream visitor -- encoding today's list of passes into tests would
+// protect against exactly the passes we already know about.
+//
+// Verified here, after every rewriting and dedup pass has run:
+//   * every pinned body is reached by the program walk,
+//   * exactly once,
+//   * with its static calls still bound,
+//   * and at least one such body is a NON-LEAF -- it actually contains calls.
+// The last item is the anti-vacuity guard: a program whose bodies make no
+// calls satisfies "bindings intact" trivially and proves nothing.
+void Precompiler::VerifyPinnedBodyTraversal() {
+  if (!FLAG_maot_verify_pinned_body_traversal) return;
+  HANDLESCOPE(T);
+  // Not `Thread* thread = T` -- T and Z are macros for thread() and zone(),
+  // and a local of either name shadows the accessor they expand to.
+  Zone* const z = Z;
+
+  GrowableArray<const Code*> pins;
+  MaotRegistry::ForEachPinnedCode(
+      T, z, [&](const Code& c) {
+        if (MaotRegistry::IsTrampolineCode(T, c.ptr())) return;
+        for (intptr_t i = 0; i < pins.length(); i++) {
+          if (pins[i]->ptr() == c.ptr()) return;
+        }
+        pins.Add(&Code::ZoneHandle(z, c.ptr()));
+      });
+
+  class CountingVisitor : public CodeVisitor {
+   public:
+    CountingVisitor(GrowableArray<const Code*>* pins,
+                    GrowableArray<intptr_t>* seen)
+        : pins_(pins), seen_(seen) {}
+    void VisitCode(const Code& code) {
+      for (intptr_t i = 0; i < pins_->length(); i++) {
+        if ((*pins_)[i]->ptr() == code.ptr()) (*seen_)[i]++;
+      }
+    }
+
+   private:
+    GrowableArray<const Code*>* pins_;
+    GrowableArray<intptr_t>* seen_;
+  };
+
+  GrowableArray<intptr_t> seen;
+  for (intptr_t i = 0; i < pins.length(); i++) seen.Add(0);
+  CountingVisitor visitor(&pins, &seen);
+  ProgramVisitor::WalkProgram(z, IG, &visitor);
+
+  intptr_t visited_once = 0, unbound = 0, with_calls = 0, missing = 0;
+  auto& table = Array::Handle(z);
+  auto& kind_off = Smi::Handle(z);
+  for (intptr_t i = 0; i < pins.length(); i++) {
+    if (seen[i] == 1) {
+      visited_once++;
+    } else if (seen[i] == 0) {
+      missing++;
+    }
+    table = pins[i]->static_calls_target_table();
+    if (table.IsNull()) continue;
+    intptr_t calls = 0;
+    StaticCallsTable entries(table);
+    for (const auto& view : entries) {
+      kind_off = view.template Get<Code::kSCallTableKindAndOffset>();
+      const auto kind = Code::KindField::decode(kind_off.Value());
+      if (kind != Code::kPcRelativeCall && kind != Code::kCallViaCode) continue;
+      calls++;
+      // Bound means: the Code-or-type slot carries the target. An entry still
+      // holding only a Function is one the binder never reached.
+      if (view.template Get<Code::kSCallTableCodeOrTypeTarget>() ==
+          Object::null()) {
+        unbound++;
+      }
+    }
+    if (calls > 0) with_calls++;
+  }
+
+  const bool pass = (pins.length() > 0) && (missing == 0) &&
+                    (visited_once == pins.length()) && (unbound == 0) &&
+                    (with_calls > 0);
+  OS::PrintErr(
+      "[maot] PINNED_TRAVERSAL bodies=%" Pd " visited_once=%" Pd
+      " never_visited=%" Pd " unbound_entries=%" Pd " non_leaf_bodies=%" Pd
+      " verdict=%s\n",
+      pins.length(), visited_once, missing, unbound, with_calls,
+      pass ? "PASS"
+           : (pins.length() == 0
+                  ? "FAIL(no pinned bodies)"
+                  : (with_calls == 0 ? "FAIL(vacuous: no non-leaf body)"
+                                     : "FAIL")));
 }
 
 void Precompiler::DropFunctions() {
