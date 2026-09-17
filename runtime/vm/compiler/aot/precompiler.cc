@@ -3309,10 +3309,36 @@ void Precompiler::ReplaceFunctionStaticCallEntries() {
           continue;
 
         target_function_ = view.Get<Code::kSCallTableFunctionTarget>();
-        if (target_function_.IsNull()) continue;
+        if (target_function_.IsNull()) {
+          // MAOT-5 (#69) diagnostic. An entry whose Function slot is already
+          // empty is never bound, so if its Code slot is empty too the entry
+          // stays null all the way into relocation, where GetTarget's
+          // ASSERT(target_.IsCode()) is compiled out and a null destination
+          // is dereferenced. Record it here, where the callee is still
+          // identifiable, rather than at the fault.
+          if (FLAG_maot_trace_serializer &&
+              view.Get<Code::kSCallTableCodeOrTypeTarget>() == Code::null()) {
+            OS::PrintErr("[maot] BIND_EMPTY_ENTRY caller=%s kind=%d off=%" Pd
+                         "\n",
+                         code.QualifiedName(
+                             NameFormattingParams(Object::kInternalName)),
+                         static_cast<int>(kind),
+                         static_cast<intptr_t>(
+                             Code::OffsetField::decode(
+                                 kind_and_offset_.Value())));
+          }
+          continue;
+        }
 
         ASSERT(view.Get<Code::kSCallTableCodeOrTypeTarget>() == Code::null());
-        ASSERT(target_function_.HasCode());
+        // ASSERT(target_function_.HasCode()) is compiled out in this build, so
+        // a codeless callee would silently bind null. Report it instead.
+        if (FLAG_maot_trace_serializer && !target_function_.HasCode()) {
+          OS::PrintErr("[maot] BIND_NO_CODE caller=%s callee=%s\n",
+                       code.QualifiedName(
+                           NameFormattingParams(Object::kInternalName)),
+                       target_function_.ToFullyQualifiedCString());
+        }
         target_code_ = target_function_.CurrentCode();
         ASSERT(!target_code_.IsStubCode());
         view.Set<Code::kSCallTableCodeOrTypeTarget>(target_code_);
