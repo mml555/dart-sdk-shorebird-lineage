@@ -8387,8 +8387,17 @@ void Serializer::PrepareInstructions(
     }
 
     GrowableArray<ImageWriterCommand> writer_commands;
+    // The Code sort completes with no duplicates, so the fault is past it.
+    // RelocateCodeObjects finalizes bare-instructions PC-relative calls --
+    // generated code containing a branch, which is what a trampoline is.
+    // Bracketed, not assumed.
+    MaotSerTrace("PREP code_objects=%" Pd " BEGIN RelocateCodeObjects\n",
+                 code_objects.length());
     RelocateCodeObjects(vm_, &code_objects, &writer_commands);
+    MaotSerTrace("PREP END RelocateCodeObjects commands=%" Pd "\n",
+                 writer_commands.length());
     image_writer_->PrepareForSerialization(&writer_commands);
+    MaotSerTrace("PREP END PrepareForSerialization\n");
 
     if (code_objects.length() == 0) {
       return;
@@ -8420,6 +8429,8 @@ void Serializer::PrepareInstructions(
     uint32_t total = 0;
     intptr_t not_discarded_count = 0;
     uint32_t first_entry_with_code = 0;
+    MaotSerTrace("PREP BEGIN stackmap_scan commands=%" Pd "\n",
+                 writer_commands.length());
     for (auto& cmd : writer_commands) {
       if (cmd.op == ImageWriterCommand::InsertInstructionOfCode) {
         RELEASE_ASSERT(code_objects[total] ==
