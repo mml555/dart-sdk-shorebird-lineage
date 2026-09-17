@@ -145,6 +145,10 @@ struct GrowableArrayStorageTraits {
 
 #if defined(DART_PRECOMPILER) && !defined(TARGET_ARCH_IA32)
 
+// Forward declaration: the tracer is defined further down, but the relocation
+// wrapper above needs it.
+static void MaotSerTrace(const char* fmt, ...);
+
 static void RelocateCodeObjects(
     bool is_vm,
     GrowableArray<CodePtr>* code_objects,
@@ -153,8 +157,15 @@ static void RelocateCodeObjects(
   auto isolate_group =
       is_vm ? Dart::vm_isolate()->group() : thread->isolate_group();
 
+  // The fault is SEGV_ACCERR -- a PERMISSION violation, not an unmapped
+  // address -- which is the signature of writing to a read-only code page.
+  // WritableCodePages exists to prevent exactly that, so which of these two
+  // operations faults is the first thing to establish.
+  MaotSerTrace("RELOC_WRAP BEGIN WritableCodePages\n");
   WritableCodePages writable_code_pages(thread, isolate_group);
+  MaotSerTrace("RELOC_WRAP END WritableCodePages / BEGIN Relocate\n");
   CodeRelocator::Relocate(thread, code_objects, image_writer_commands, is_vm);
+  MaotSerTrace("RELOC_WRAP END Relocate\n");
 }
 
 #endif  // defined(DART_PRECOMPILER) && !defined(TARGET_ARCH_IA32)
@@ -8394,6 +8405,7 @@ void Serializer::PrepareInstructions(
     MaotSerTrace("PREP code_objects=%" Pd " BEGIN RelocateCodeObjects\n",
                  code_objects.length());
     RelocateCodeObjects(vm_, &code_objects, &writer_commands);
+    MaotSerTrace("PREP RelocateCodeObjects returned\n");
     MaotSerTrace("PREP END RelocateCodeObjects commands=%" Pd "\n",
                  writer_commands.length());
     image_writer_->PrepareForSerialization(&writer_commands);
