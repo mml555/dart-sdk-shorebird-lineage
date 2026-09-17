@@ -3432,6 +3432,11 @@ static FunctionPtr MaotResolveForwarder(Zone* zone, const Function& target) {
 static void MaotNoteSwitchableState(Thread* thread,
                                     const Function& raw_target,
                                     const char* state) {
+  // raw_target is what the dispatch state actually STORES. target is the
+  // declaration it belongs to. Both are needed: the registry is keyed on the
+  // second, but the property being classified is about the first.
+  const bool via_forwarder =
+      !raw_target.IsNull() && raw_target.IsDynamicInvocationForwarder();
   const Function& target =
       Function::Handle(thread->zone(),
                        MaotResolveForwarder(thread->zone(), raw_target));
@@ -3471,21 +3476,57 @@ static void MaotNoteSwitchableState(Thread* thread,
   if (entry < 0) return;
   const auto& tramp =
       Code::Handle(zone, MaotRegistry::TrampolineAt(thread, entry));
-  const bool converges =
-      !tramp.IsNull() && target.HasCode() &&
-      target.CurrentCode() == tramp.ptr();
+
+  // The two routes are slot-preserving for DIFFERENT reasons, and testing
+  // both against the trampoline is what made this check imprecise: a
+  // forwarder's CurrentCode is its own Code and never the trampoline, so
+  // asking whether the DECLARATION's CurrentCode is the trampoline answered
+  // a question about an object the state does not store. It returned the
+  // right verdict for the wrong reason, which means it would also have
+  // returned that verdict if the forwarder had bound an implementation
+  // directly -- a hard stop condition scored as a pass.
+  bool converges;
+  char why[256];
+  if (!via_forwarder) {
+    // Declaration route: the state stores the declaration, so its executable
+    // target must be the trampoline, which loads the cell.
+    converges = !tramp.IsNull() && target.HasCode() &&
+                target.CurrentCode() == tramp.ptr();
+    Utils::SNPrint(why, sizeof(why),
+                   "route=declaration; the executable target this state "
+                   "stores is %s the declaration trampoline, which loads "
+                   "the mutable cell",
+                   converges ? "" : "NOT");
+  } else {
+    // Forwarder route: the trampoline is not on this path at all. What makes
+    // it slot-preserving is that the forwarder reaches the CELL rather than
+    // an implementation, and the compile-time record of that is the
+    // declaration's indirect (cell) call sites. Zero of them means whatever
+    // the forwarder calls, it is not the cell -- fail closed.
+    const intptr_t sites = MaotRegistry::CallSiteCountAt(thread, entry);
+    converges = sites > 0;
+    Utils::SNPrint(why, sizeof(why),
+                   "route=dyn-invocation-forwarder; declaration has %" Pd
+                   " indirect cell call site(s), so the forwarder resolves "
+                   "the implementation through the mutable cell rather than "
+                   "storing one%s",
+                   sites,
+                   converges ? "" : " -- NONE emitted, so it does not");
+  }
+
   const intptr_t hit =
       MaotRegistry::NoteSwitchableStateHit(state, converges);
   if (!MaotRegistry::ShouldRecordSwitchableState(hit)) return;
+  // Decorate the recorded state so the two routes cannot be conflated in the
+  // decision log the way they were in the check.
+  char decorated[192];
+  Utils::SNPrint(decorated, sizeof(decorated), "%s%s", state,
+                 via_forwarder ? " via=dyn-invocation-forwarder" : "");
   MaotRegistry::NoteDecision(
       thread, String::Handle(zone, MaotRegistry::DeclarationIdOf(thread,
                                                                 target)),
       String::Handle(zone, String::New("<runtime-dispatch>", Heap::kOld)),
-      state,
-      converges ? "the executable target this state stores is the "
-                  "declaration trampoline, which loads the mutable cell"
-                : "the executable target this state stores is NOT the "
-                  "declaration trampoline",
+      decorated, why,
       converges ? MaotRegistry::kSlotPreserving
                 : MaotRegistry::kUnmodeledBlocking);
 }

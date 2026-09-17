@@ -404,6 +404,10 @@ class MaotRegistry : public AllStatic {
   // Compiler-path evidence, gathered during code generation and therefore
   // carried across the rebuild of the table at materialization.
   static intptr_t CallSiteCountFor(Thread* thread, const Function& function);
+  // By ENTRY, not by implementation Function. CallSiteCountFor keys on
+  // kCurrentImpl, which every install advances, so after a replacement it
+  // stops answering for the declaration that owns the entry.
+  static intptr_t CallSiteCountAt(Thread* thread, intptr_t entry);
   static void SetCallSiteCountFor(Thread* thread,
                                   const String& declaration_id,
                                   intptr_t count);
