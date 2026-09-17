@@ -2701,9 +2701,26 @@ MAOT_TEST_EXPORT int64_t Dart_MaotInspectSwitchableSite(
                           MegamorphicCache::kTargetFunctionIndex);
       if (!target.IsFunction()) continue;
       const auto& fn = Function::Cast(target);
-      tid = MaotRegistry::DeclarationIdOf(thread, fn);
+      // A dynamic call to a member with a typed parameter caches that member's
+      // DYNAMIC INVOCATION FORWARDER, not the member, so matching the cached
+      // Function against the declaration id alone reports NO ENTRY for every
+      // setter, operator and callable call() -- an absence that reads like an
+      // evicted entry and is nothing of the kind.
+      //
+      // The routing this exposes is genuinely DIFFERENT and is labelled rather
+      // than folded into the accepted record: the forwarder's CurrentCode is
+      // its own Code, never the declaration trampoline, and its tail performs
+      // the #67 cell indirection directly. So the frozen cache reaches the
+      // mutable cell WITHOUT passing through the trampoline.
+      const bool via_forwarder = fn.IsDynamicInvocationForwarder();
+      const auto& decl_fn = Function::Handle(
+          zone, via_forwarder ? fn.ForwardingTarget() : fn.ptr());
+      tid = decl_fn.IsNull() ? String::null()
+                             : MaotRegistry::DeclarationIdOf(thread, decl_fn);
       if (tid.IsNull() || !tid.Equals(id)) continue;
       found = true;
+      fprintf(f, "    via=%s\n",
+              via_forwarder ? "dyn-invocation-forwarder" : "declaration");
       const auto& cur = Code::Handle(zone, fn.HasCode() ? fn.CurrentCode()
                                                         : Code::null());
       const auto& owner = Class::Handle(zone, fn.Owner());
@@ -2739,7 +2756,11 @@ MAOT_TEST_EXPORT int64_t Dart_MaotInspectSwitchableSite(
                             MegamorphicCache::kTargetFunctionIndex);
         if (!target.IsFunction()) continue;
         const auto& fn = Function::Cast(target);
-        tid = MaotRegistry::DeclarationIdOf(thread, fn);
+        const auto& bdecl = Function::Handle(
+            zone, fn.IsDynamicInvocationForwarder() ? fn.ForwardingTarget()
+                                                    : fn.ptr());
+        tid = bdecl.IsNull() ? String::null()
+                             : MaotRegistry::DeclarationIdOf(thread, bdecl);
         const auto& owner = Class::Handle(zone, fn.Owner());
         const auto& owner_name = String::Handle(
             zone, owner.IsNull() ? String::null() : owner.Name());
