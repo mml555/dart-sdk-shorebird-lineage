@@ -939,6 +939,13 @@ void SerializationCluster::WriteAndMeasureAlloc(Serializer* serializer) {
 }
 
 void SerializationCluster::WriteAndMeasureFill(Serializer* serializer) {
+  // Printed BEFORE the fill. The existing report below prints after, so a
+  // cluster that faults mid-fill never names itself and shows only as the
+  // gap after the last successful one. The setter trampoline crash sits in
+  // exactly that gap, after FunctionType.
+  if (FLAG_print_cluster_information) {
+    OS::PrintErr("Snapshot: BEGIN Fill %s\n", name());
+  }
   intptr_t start = serializer->bytes_written();
   WriteFill(serializer);
   intptr_t stop = serializer->bytes_written();
