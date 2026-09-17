@@ -2109,25 +2109,52 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
       // nothing decides on them.
       writer.PrintProperty("current_implementation_id",
                            cur_id.IsNull() ? "<absent>" : cur_id.ToCString());
-      // MAOT-5: both halves of the cell, and whether they agree. They are
-      // written together and must stay together; a cell whose Function and
-      // Code disagree would dispatch to one body while reporting another's
-      // identity, and that has to be readable rather than deduced.
+      // MAOT-5: both halves of the cell, reported as the TWO invariants that
+      // actually matter.
+      //
+      // The old single field asked whether cell.implCode equalled
+      // implFunction.CurrentCode(). That encoded an assumption which #69 then
+      // disproved: once a trampoline is attached, a selected replacement's
+      // CurrentCode IS its trampoline, so the cell agreeing with it meant the
+      // cell held a TRAMPOLINE -- the defect. The field read true while the
+      // program was wrong and false once it was fixed, which is the worst
+      // possible polarity for a reviewer.
+      //
+      // So it is replaced by the two conditions that are genuinely required:
+      // the Function half names the current implementation, and the Code half
+      // is that implementation's PINNED BODY. The raw comparison is kept
+      // under a name that says what it compares, and is explicitly NOT an
+      // integrity condition.
       {
         const auto& cell_code = Object::Handle(zone,
             cell.IsNull() ? Object::null() : cell.At(kCellImplCode));
         const auto& in_cell_fn = Function::Handle(zone,
             in_cell.IsNull() ? Function::null()
                              : Function::RawCast(in_cell.ptr()));
-        const auto& expected = Object::Handle(zone,
+        const auto& impl_current_code = Object::Handle(zone,
             in_cell_fn.IsNull() || !in_cell_fn.HasCode()
                 ? Object::null() : in_cell_fn.CurrentCode());
+        const auto& pinned_body =
+            Object::Handle(zone, FieldAt(thread, i, kCurrentCode));
+        const auto& current_impl_fn =
+            Object::Handle(zone, FieldAt(thread, i, kCurrentImpl));
         writer.PrintProperty64("dispatch_cell_length",
                                cell.IsNull() ? -1 : cell.Length());
         writer.PrintPropertyBool("dispatch_cell_has_code",
                                  !cell_code.IsNull());
-        writer.PrintPropertyBool("dispatch_cell_halves_agree",
-                                 cell_code.ptr() == expected.ptr());
+        // INVARIANT 1: the Function half is the current implementation.
+        writer.PrintPropertyBool(
+            "dispatch_cell_function_matches_current_impl",
+            !in_cell.IsNull() && in_cell.ptr() == current_impl_fn.ptr());
+        // INVARIANT 2: the Code half is that implementation's pinned body.
+        writer.PrintPropertyBool(
+            "dispatch_cell_code_matches_pinned_current_body",
+            !cell_code.IsNull() && cell_code.ptr() == pinned_body.ptr());
+        // RAW, not an integrity condition. Expected FALSE once the
+        // implementation owns a trampoline, and that is correct.
+        writer.PrintPropertyBool(
+            "dispatch_cell_code_equals_impl_current_code_raw",
+            cell_code.ptr() == impl_current_code.ptr());
       }
       writer.PrintPropertyBool(
           "current_implementation_is_the_declaration_itself",
