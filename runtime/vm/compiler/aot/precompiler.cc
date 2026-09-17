@@ -3465,7 +3465,8 @@ void Precompiler::VerifyPinnedBodyTraversal() {
   CountingVisitor visitor(&pins, &seen);
   ProgramVisitor::WalkProgram(z, IG, &visitor);
 
-  intptr_t visited_once = 0, unbound = 0, with_calls = 0, missing = 0;
+  intptr_t visited_once = 0, unbound = 0, with_calls = 0, missing = 0,
+           multiply = 0;
   auto& table = Array::Handle(z);
   auto& kind_off = Smi::Handle(z);
   for (intptr_t i = 0; i < pins.length(); i++) {
@@ -3473,6 +3474,11 @@ void Precompiler::VerifyPinnedBodyTraversal() {
       visited_once++;
     } else if (seen[i] == 0) {
       missing++;
+    } else {
+      // AddToWorklist dedups on object id so the walker cannot deliver a Code
+      // twice, but a second root source could. Counted rather than assumed
+      // impossible.
+      multiply++;
     }
     table = pins[i]->static_calls_target_table();
     if (table.IsNull()) continue;
@@ -3499,6 +3505,7 @@ void Precompiler::VerifyPinnedBodyTraversal() {
   // misleading as passing it silently, so it reports as PASS_LEAF_ONLY and the
   // harness requires at least one non-leaf row across the suite.
   const bool structurally_ok = (pins.length() > 0) && (missing == 0) &&
+                               (multiply == 0) &&
                                (visited_once == pins.length()) &&
                                (unbound == 0);
   const char* verdict;
@@ -3511,9 +3518,10 @@ void Precompiler::VerifyPinnedBodyTraversal() {
   }
   OS::PrintErr(
       "[maot] PINNED_TRAVERSAL bodies=%" Pd " visited_once=%" Pd
-      " never_visited=%" Pd " unbound_entries=%" Pd " non_leaf_bodies=%" Pd
-      " verdict=%s\n",
-      pins.length(), visited_once, missing, unbound, with_calls, verdict);
+      " never_visited=%" Pd " multiply_visited=%" Pd " unbound_entries=%" Pd
+      " non_leaf_bodies=%" Pd " verdict=%s\n",
+      pins.length(), visited_once, missing, multiply, unbound, with_calls,
+      verdict);
 }
 
 void Precompiler::DropFunctions() {
