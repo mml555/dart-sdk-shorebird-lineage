@@ -298,14 +298,48 @@ void CodeRelocator::ScanCallTargets(const Code& code,
       // Destination provenance BEFORE anything derived from instructions_ is
       // touched. The classifier compares pointers only and never dereferences
       // the candidate.
+      const uword raw_before = static_cast<uword>(destination_.ptr());
       char cls[512];
       MaotRegistry::ClassifyCodePointer(Thread::Current(), destination_.ptr(),
                                         cls, sizeof(cls));
-      MaotRelocTrace("    c%" Pd ".%" Pd " target=%p registry=%s\n",
-                     g_maot_reloc_code_ord, maot_call_ord - 1,
-                     reinterpret_cast<void*>(
-                         static_cast<uword>(destination_.ptr())),
-                     cls);
+      const uword raw_after = static_cast<uword>(destination_.ptr());
+      MaotRelocTrace("    c%" Pd ".%" Pd " target=0x%" Px " target_again=0x%" Px
+                     " registry=%s\n",
+                     g_maot_reloc_code_ord, maot_call_ord - 1, raw_before,
+                     raw_after, cls);
+
+      // What object is the destination, really? This reads the destination's
+      // own header and fields only. It never dereferences instructions_,
+      // which is the pointer STEP4 faults on.
+      if (destination_.ptr() != Object::null()) {
+        const intptr_t dest_cid = destination_.ptr()->GetClassId();
+        const bool is_code = destination_.IsCode();
+        const uword instr_raw =
+            is_code ? static_cast<uword>(
+                          Code::InstructionsOf(destination_.ptr()))
+                    : 0;
+        MaotRelocTrace("    c%" Pd ".%" Pd " dest_cid=%" Pd " isCode=%d"
+                       " dest_instr=0x%" Px "\n",
+                       g_maot_reloc_code_ord, maot_call_ord - 1, dest_cid,
+                       is_code ? 1 : 0, instr_raw);
+        if (is_code) {
+          const auto& downer = Object::Handle(destination_.owner());
+          MaotRelocTrace(
+              "    c%" Pd ".%" Pd " dest_owner=%p dest_owner_desc=%s"
+              " dest_is_tramp=%d\n",
+              g_maot_reloc_code_ord, maot_call_ord - 1,
+              reinterpret_cast<void*>(static_cast<uword>(downer.ptr())),
+              downer.IsNull()
+                  ? "<null>"
+                  : (downer.IsFunction()
+                         ? Function::Cast(downer).ToFullyQualifiedCString()
+                         : downer.ToCString()),
+              MaotRegistry::IsTrampolineCode(Thread::Current(),
+                                             destination_.ptr())
+                  ? 1
+                  : 0);
+        }
+      }
     }
 
     // A call site can decide to jump not to the beginning of a function but
