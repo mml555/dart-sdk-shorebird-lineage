@@ -2439,6 +2439,61 @@ MAOT_TEST_EXPORT int64_t Dart_MaotInspectSwitchableSite(
   if (data.IsMonomorphicSmiableCall()) {
     stored = MonomorphicSmiableCall::Cast(data).entrypoint();
     expected_cid = MonomorphicSmiableCall::Cast(data).expected_cid();
+  } else if (data.IsMegamorphicCache()) {
+    // This state caches a FUNCTION per receiver cid, not a Code and not a raw
+    // address. So the convergence question is different again: does the entry
+    // retain the stable DECLARATION Function -- whose CurrentCode is the
+    // trampoline -- or does it retain an implementation Function whose body
+    // would be frozen at the moment it was resolved?
+    //
+    // The entry is found by declaration identity rather than by a cid the
+    // caller guesses: scan the buckets for a target whose #65 declaration id
+    // is the one being asked about.
+    const auto& cache = MegamorphicCache::Cast(data);
+    const auto& buckets = Array::Handle(zone, cache.buckets());
+    const intptr_t mask = cache.mask();
+    auto& target = Object::Handle(zone);
+    auto& cid_smi = Object::Handle(zone);
+    auto& tid = String::Handle(zone);
+    const auto& tramp = Code::Handle(
+        zone, entry >= 0 ? MaotRegistry::TrampolineAt(thread, entry)
+                         : Code::null());
+    bool found = false;
+    for (intptr_t i = 0; i <= mask && !found; i++) {
+      cid_smi = buckets.At(i * MegamorphicCache::kEntryLength +
+                           MegamorphicCache::kClassIdIndex);
+      target = buckets.At(i * MegamorphicCache::kEntryLength +
+                          MegamorphicCache::kTargetFunctionIndex);
+      if (!target.IsFunction()) continue;
+      const auto& fn = Function::Cast(target);
+      tid = MaotRegistry::DeclarationIdOf(thread, fn);
+      if (tid.IsNull() || !tid.Equals(id)) continue;
+      found = true;
+      const auto& cur = Code::Handle(zone, fn.HasCode() ? fn.CurrentCode()
+                                                        : Code::null());
+      const auto& owner = Class::Handle(zone, fn.Owner());
+      const auto& owner_name =
+          String::Handle(zone, owner.IsNull() ? String::null() : owner.Name());
+      fprintf(f,
+              "site=0x%" Px " state=MegamorphicCache entry_cid=%s "
+              "cached_fn=%s owner=%s cached_fn_addr=%p "
+              "CurrentCode_IS_trampoline=%s trampoline_entry=0x%" Px
+              " filled_entries=%" Pd "\n",
+              pc, cid_smi.ToCString(), fn.ToCString(),
+              owner_name.IsNull() ? "<null>" : owner_name.ToCString(),
+              reinterpret_cast<void*>(static_cast<uword>(fn.ptr())),
+              (!tramp.IsNull() && !cur.IsNull() && cur.ptr() == tramp.ptr())
+                  ? "YES"
+                  : "NO",
+              tramp.IsNull() ? 0 : tramp.EntryPoint(),
+              cache.filled_entry_count());
+    }
+    if (!found) {
+      fprintf(f, "site=0x%" Px " state=MegamorphicCache NO ENTRY for %s\n", pc,
+              declaration_id);
+    }
+    fclose(f);
+    return 0;
   } else if (data.IsSingleTargetCache()) {
     // This state freezes BOTH a real Code pointer and a raw entry point, so
     // both are reported: a raw address that matches while the Code pointer
