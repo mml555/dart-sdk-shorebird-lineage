@@ -385,6 +385,17 @@ class MaotRegistry : public AllStatic {
       Zone* zone,
       const std::function<CodePtr(const Code&)>& canonicalize);
 
+  // Every Code object the registry pins, read-only.
+  //
+  // Once a selected declaration's CurrentCode is its trampoline, its
+  // implementation BODY Code is reachable from nothing else, so any caller
+  // that must reach the whole program has to be told about these explicitly.
+  // Shares one field list with CanonicalizeCodePins so the set that gets
+  // canonicalized and the set that gets walked cannot drift apart.
+  static void ForEachPinnedCode(Thread* thread,
+                                Zone* zone,
+                                const std::function<void(const Code&)>& visit);
+
   static void SetInlineCountsFor(Thread* thread,
                                  const String& declaration_id,
                                  intptr_t refusals,
@@ -613,6 +624,16 @@ class MaotRegistry : public AllStatic {
     kStagedCallConv,      // String or null
     kEntrySize
   };
+
+  // The Code fields the registry pins. kCurrentCode and kReleaseCode are the
+  // descriptor's pins; the cell's Code half, handled alongside these, is what
+  // the #69 trampoline actually branches through.
+  //
+  // One list, because two callers must agree on it: the Dedup canonicalizer
+  // that rewrites the pins, and ProgramVisitor::WalkProgram, which cannot
+  // reach a declaration body any other way once the trampoline is its
+  // CurrentCode. Two copies of this set would drift silently.
+  static const EntryField kPinnedCodeFields[3];
 
   static GrowableObjectArrayPtr EnsureStorage(Thread* thread);
   static ObjectPtr FieldAt(Thread* thread, intptr_t entry, EntryField field);
