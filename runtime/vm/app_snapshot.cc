@@ -9135,9 +9135,20 @@ ZoneGrowableArray<Object*>* Serializer::Serialize(SerializationRoots* roots) {
     }
   }
 
+  // Post-trace boundary brackets. Trace completes in BOTH runs, so the graph
+  // is traversable; what is not yet shown is that it is internally consistent
+  // for allocation/layout. A bad count, duplicated object, or object in an
+  // incompatible cluster survives Trace and fails here.
+  MaotSerTrace("POST BEGIN PrepareInstructions\n");
   PrepareInstructions(roots->canonicalized_stack_map_entries());
+  MaotSerTrace("POST END PrepareInstructions\n");
 
   intptr_t num_objects = num_base_objects_ + num_written_objects_;
+  MaotSerTrace("POST HEADER num_base_objects=%" Pd " num_objects=%" Pd
+               " clusters=%" Pd " instructions_table_len=%" Pd
+               " rodata_offset=%" Pd "\n",
+               num_base_objects_, num_objects, clusters.length(),
+               instructions_table_len_, instructions_table_rodata_offset_);
 #if defined(ARCH_IS_64_BIT)
   if (!Utils::IsInt(32, num_objects)) {
     FATAL("Ref overflow");
@@ -9151,8 +9162,13 @@ ZoneGrowableArray<Object*>* Serializer::Serialize(SerializationRoots* roots) {
   WriteUnsigned(instructions_table_len_);
   WriteUnsigned(instructions_table_rodata_offset_);
 
+  intptr_t maot_alloc_ord = 0;
   for (SerializationCluster* cluster : clusters_) {
+    MaotSerTrace("POST ALLOC_BEGIN %" Pd " %s\n", maot_alloc_ord,
+                 cluster->name());
     cluster->WriteAndMeasureAlloc(this);
+    MaotSerTrace("POST ALLOC_END %" Pd " %s\n", maot_alloc_ord, cluster->name());
+    maot_alloc_ord++;
     bytes_heap_allocated_ += cluster->target_memory_size();
 #if defined(DEBUG)
     Write<int32_t>(next_ref_index_);
