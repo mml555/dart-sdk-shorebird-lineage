@@ -304,7 +304,7 @@ void ProgramVisitor::WalkProgram(Zone* zone,
     // here: program_visitor.cc is compiled into five library variants and
     // maot_registry.cc into two, so naming the flag symbol at this call site
     // fails to link in the variants that have no registry translation unit.
-    MaotRegistry::ForEachPinnedCode(
+    MaotRegistry::AddPinnedCodeRoots(
         Thread::Current(), zone,
         [&](const Code& pinned) { walker.AddToWorklist(pinned); });
   }
