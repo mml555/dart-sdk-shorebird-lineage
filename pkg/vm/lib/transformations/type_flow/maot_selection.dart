@@ -46,12 +46,33 @@ bool isMaotMutable(Member member) {
 final bool maotSelectAllNonSdk =
     Platform.environment['MAOT_SELECT_ALL_NON_SDK'] == '1';
 
-/// Restricts the scale lane to libraries whose import URI starts with this,
-/// so the realistic posture -- an app author marking their OWN declarations
-/// mutable -- can be measured next to the upper bound of marking everything.
-/// Empty means no restriction.
-final String maotSelectUriPrefix =
-    Platform.environment['MAOT_SELECT_URI_PREFIX'] ?? '';
+/// Restricts selection to libraries whose import URI starts with one of these
+/// prefixes. Empty means no restriction.
+///
+/// A COMMA-SEPARATED LIST, because production selection policy v1 is stated in
+/// terms of source ownership: the root application package is mutable, third
+/// party packages are opt-in, the SDK is excluded. A single prefix expresses
+/// the root package; the list is what lets a specific dependency be opted in
+/// without widening to everything.
+///
+/// Ownership is a property of where the code lives, so this deliberately does
+/// not consult call form, hotness, body sharing, cache state, or anything the
+/// optimizer decided during one particular build.
+final List<String> maotSelectUriPrefixes =
+    (Platform.environment['MAOT_SELECT_URI_PREFIX'] ?? '')
+        .split(',')
+        .map((p) => p.trim())
+        .where((p) => p.isNotEmpty)
+        .toList(growable: false);
+
+bool maotUriPrefixAllows(Library lib) {
+  if (maotSelectUriPrefixes.isEmpty) return true;
+  final uri = lib.importUri.toString();
+  for (final prefix in maotSelectUriPrefixes) {
+    if (uri.startsWith(prefix)) return true;
+  }
+  return false;
+}
 
 /// The scale lane's selection predicate: the same population the pragma path
 /// can reach, minus what the registry would skip anyway. An abstract or
@@ -60,10 +81,7 @@ final String maotSelectUriPrefix =
 bool isMaotSelectableAtScale(Member member) {
   final lib = maotEnclosingLibraryOrNull(member);
   if (lib == null) return false;
-  if (maotSelectUriPrefix.isNotEmpty &&
-      !lib.importUri.toString().startsWith(maotSelectUriPrefix)) {
-    return false;
-  }
+  if (!maotUriPrefixAllows(lib)) return false;
   if (member is Procedure) {
     return !member.isAbstract &&
         !member.isExternal &&
