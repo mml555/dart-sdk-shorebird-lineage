@@ -2466,7 +2466,30 @@ void Precompiler::RepinMutableAotImplementations() {
   }
 }
 
+DECLARE_FLAG(charp, maot_dump_retained);
+
 void Precompiler::MaterializeMutableAotRegistry() {
+  // Dumped here because the reachability fixpoint is complete and nothing has
+  // yet been dropped. Written for EVERY build, including baselines with no
+  // selected declarations, so the two sets are directly comparable.
+  if (FLAG_maot_dump_retained != nullptr) {
+    FILE* out = fopen(FLAG_maot_dump_retained, "w");
+    if (out != nullptr) {
+      FunctionSet::Iterator it(&functions_to_retain_);
+      auto& f = Function::Handle(Z);
+      intptr_t n = 0;
+      while (it.MoveNext()) {
+        f ^= functions_to_retain_.GetKey(it.Current());
+        if (f.IsNull()) continue;
+        fprintf(out, "%s\n", f.ToFullyQualifiedCString());
+        n++;
+      }
+      fclose(out);
+      OS::PrintErr("[maot] RETAINED_DUMP n=%" Pd " -> %s\n", n,
+                   FLAG_maot_dump_retained);
+    }
+  }
+
   // The transient table carried the load-time association. The FINAL registry
   // contains only SELECTED declarations whose Function the precompiler
   // actually retained -- an unselected declaration must never receive an

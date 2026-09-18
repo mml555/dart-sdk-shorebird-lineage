@@ -74,6 +74,15 @@ DEFINE_FLAG(charp,
             "declaration, so each disposition's install consequence can be "
             "measured rather than argued from the enum.");
 
+DEFINE_FLAG(charp,
+            maot_dump_retained,
+            nullptr,
+            "Write one fully-qualified name per retained Function to this "
+            "path, after the reachability fixpoint. Exists to prove tree-"
+            "shaking neutrality by set comparison: every declaration selected "
+            "under a policy must already appear in the baseline build's "
+            "retained set, and similar snapshot sizes are not that proof.");
+
 DEFINE_FLAG(bool,
             maot_disable_pinned_body_roots,
             false,
