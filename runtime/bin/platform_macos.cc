@@ -94,6 +94,12 @@ bool Platform::Initialize(bool install_crash_handler /*= true */) {
     return false;
   }
 
+  // Diagnostic escape hatch: with a sanitizer build, Dart's own handler traps
+  // SIGSEGV/SIGBUS first and aborts, so the sanitizer never reports. Nothing
+  // about MAOT semantics changes -- this only decides who reports the fault.
+  if (getenv("DART_NO_CRASH_HANDLER") != nullptr) {
+    install_crash_handler = false;
+  }
   if (install_crash_handler) {
     act = {};
     act.sa_flags = SA_SIGINFO;
