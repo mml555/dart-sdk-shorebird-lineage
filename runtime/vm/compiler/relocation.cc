@@ -84,6 +84,10 @@ DECLARE_FLAG(bool, maot_trace_serializer);
 
 static FILE* g_maot_reloc_trace = nullptr;
 static intptr_t g_maot_reloc_code_ord = -1;
+// Counts entries into the provenance/classification path. The invariant this
+// exists to prove is MAOT_DIAGNOSTICS_DISABLED_NO_WORK: with tracing off the
+// path must not execute at all, not merely stay silent.
+static intptr_t g_maot_classifications = 0;
 
 static void MaotRelocTrace(const char* fmt, ...) {
   if (!FLAG_maot_trace_serializer) return;
@@ -195,6 +199,11 @@ void CodeRelocator::Relocate(bool is_vm_isolate) {
 
   // Don't drop static call targets table yet. Snapshotter will skip it anyway
   // however we might need it to write information into V8 snapshot profile.
+
+  // Unconditional, one line per relocation pass. Asserting "the diagnostic did
+  // not run" requires a number that exists when it is switched off.
+  OS::PrintErr("[maot] DIAG_CLASSIFICATIONS n=%" Pd " trace=%d\n",
+               g_maot_classifications, FLAG_maot_trace_serializer ? 1 : 0);
 }
 
 bool CodeRelocator::AddInstructionsToText(CodePtr code,
@@ -429,6 +438,7 @@ void CodeRelocator::ScanCallTargets(const Code& code,
     // string characters. That is a per-call O(registry) walk with allocation,
     // inside the relocation loop. Diagnostics must not run when not asked for.
     if (FLAG_maot_trace_serializer) {
+      g_maot_classifications++;
       // Destination provenance BEFORE anything derived from instructions_ is
       // touched. The classifier compares pointers only and never dereferences
       // the candidate.
