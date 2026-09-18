@@ -269,6 +269,34 @@ void CodeRelocator::ScanCallTargets(const Code& code,
   if (call_targets.IsNull()) {
     return;
   }
+  // The one input the two refuted measurements never validated: the CALLER
+  // Code itself. code.Size() and code.PayloadStart() both derive from its
+  // instructions_, so a corrupt caller makes the earlier offset bounds check
+  // pass vacuously and sends PcRelativeCallPattern at a wild address -- which
+  // fits a fault on program text better than either refuted hypothesis.
+  {
+    static intptr_t caller_reports = 0;
+    static constexpr intptr_t kCallerCap = 8;
+    const uword craw = static_cast<uword>(code.ptr());
+    const bool ctagged = (craw & kHeapObjectTag) != 0;
+    const intptr_t ccid =
+        ctagged ? code.ptr()->GetClassIdOfHeapObject() : -1;
+    const InstructionsPtr instr =
+        (ccid == kCodeCid) ? code.instructions() : Instructions::null();
+    const uword iraw = static_cast<uword>(instr);
+    const bool itagged = (iraw & kHeapObjectTag) != 0;
+    const intptr_t icid =
+        itagged ? instr->GetClassIdOfHeapObject() : -1;
+    const bool ok = (ccid == kCodeCid) && (icid == kInstructionsCid);
+    if (!ok && caller_reports < kCallerCap) {
+      caller_reports++;
+      OS::PrintErr("[maot] BAD_CALLER_CODE #%" Pd " code_raw=0x%" Px
+                   " code_cid=%" Pd " instr_raw=0x%" Px " instr_cid=%" Pd
+                   " ord=%" Pd "\n",
+                   caller_reports, craw, ccid, iraw, icid,
+                   g_maot_reloc_code_ord);
+    }
+  }
   StaticCallsTable calls(call_targets);
   intptr_t maot_call_ord = 0;
   for (auto call : calls) {
@@ -293,8 +321,114 @@ void CodeRelocator::ScanCallTargets(const Code& code,
       continue;
     }
 
-    destination_ = GetTarget(call);
+    // AUTHORIZED MEASUREMENT (REALAPP_MAOT_SELECTION_PRECOMPILER): what does
+    // the target slot actually hold? GetTarget assumes Code or AbstractType
+    // and its ASSERT is compiled out here, so anything else is cast to Code
+    // and dereferenced.
+    //
+    // The raw value is printed BEFORE any classification, because classifying
+    // requires reading the object header and that is exactly what may fault.
+    // Not gated on the trace flag: it prints only when an entry is already
+    // invalid, so it is bounded by the defect rather than by the program size.
     {
+      static intptr_t bad_reports = 0;
+      static constexpr intptr_t kCap = 8;
+      // The TARGET slot was measured first and came back well-shaped every
+      // time, while the crash persisted -- so the other two inputs to this
+      // loop are checked as well. The kind/offset Smi is read BEFORE the
+      // target slot, and a bad offset is consumed by
+      // `code.PayloadStart() + call_instruction_offset`, which reads raw
+      // instruction memory: that dereference, not the target cast, matches a
+      // fault address made of program text.
+      const ObjectPtr kao = call.Get<Code::kSCallTableKindAndOffset>();
+      const bool kao_is_smi = ((static_cast<uword>(kao) & kSmiTagMask) == kSmiTag);
+      const intptr_t code_size = code.Size();
+      const intptr_t decoded_off =
+          kao_is_smi ? static_cast<intptr_t>(
+                           Code::OffsetField::decode(Smi::Value(Smi::RawCast(kao))))
+                     : -1;
+      const bool offset_ok =
+          kao_is_smi && decoded_off >= 0 && decoded_off <= code_size;
+      const intptr_t table_len = call_targets.Length();
+      const bool table_shape_ok =
+          (table_len % Code::kSCallTableEntryLength) == 0;
+      if ((!kao_is_smi || !offset_ok || !table_shape_ok) &&
+          bad_reports < kCap) {
+        bad_reports++;
+        OS::PrintErr("[maot] BAD_SCALL_SHAPE #%" Pd " idx=%" Pd
+                     " kao_is_smi=%d decoded_off=%" Pd " code_size=%" Pd
+                     " table_len=%" Pd " table_shape_ok=%d\n",
+                     bad_reports, maot_call_ord - 1, kao_is_smi ? 1 : 0,
+                     decoded_off, code_size, table_len,
+                     table_shape_ok ? 1 : 0);
+        const auto& sowner = Object::Handle(Thread::Current()->zone(),
+                                            code.owner());
+        OS::PrintErr("[maot]   owner_code=%p owner=%s\n",
+                     reinterpret_cast<void*>(static_cast<uword>(code.ptr())),
+                     sowner.IsNull()
+                         ? "<null>"
+                         : (sowner.IsFunction()
+                                ? Function::Cast(sowner).ToFullyQualifiedCString()
+                                : sowner.ToCString()));
+      }
+      const ObjectPtr raw = call.Get<Code::kSCallTableCodeOrTypeTarget>();
+      const uword rawv = static_cast<uword>(raw);
+      const bool tagged_heap = (rawv & kHeapObjectTag) != 0;
+      bool classifiable = (raw == Object::null()) || tagged_heap;
+      bool shape_ok = false;
+      if (raw == Object::null()) {
+        shape_ok = true;  // unbound entries are a different, known story
+      } else if (classifiable) {
+        const intptr_t cid = raw->GetClassIdOfHeapObject();
+        shape_ok = (cid == kCodeCid) || IsAbstractTypeClassId(cid);
+      }
+      if (!shape_ok && bad_reports < kCap) {
+        bad_reports++;
+        const auto& owner = Object::Handle(Thread::Current()->zone(), code.owner());
+        OS::PrintErr(
+            "[maot] BAD_SCALL_ENTRY #%" Pd " raw=0x%" Px " tagged=%d"
+            " idx=%" Pd " kind=%d return_pc_off=%" Pd "\n",
+            bad_reports, rawv, tagged_heap ? 1 : 0, maot_call_ord - 1,
+            static_cast<int>(kind),
+            static_cast<intptr_t>(return_pc_offset));
+        OS::PrintErr(
+            "[maot]   owner_code=%p owner=%s\n",
+            reinterpret_cast<void*>(static_cast<uword>(code.ptr())),
+            owner.IsNull() ? "<null>"
+                           : (owner.IsFunction()
+                                  ? Function::Cast(owner).ToFullyQualifiedCString()
+                                  : owner.ToCString()));
+        if (classifiable && raw != Object::null()) {
+          OS::PrintErr("[maot]   cid=%" Pd " IsCode=%d IsAbstractType=%d\n",
+                       raw->GetClassIdOfHeapObject(),
+                       raw->GetClassIdOfHeapObject() == kCodeCid ? 1 : 0,
+                       IsAbstractTypeClassId(raw->GetClassIdOfHeapObject()) ? 1
+                                                                           : 0);
+        }
+        // Neighbouring entries of the same Code, for comparison.
+        intptr_t n = 0;
+        for (auto peer : calls) {
+          const ObjectPtr praw =
+              peer.Get<Code::kSCallTableCodeOrTypeTarget>();
+          const uword pv = static_cast<uword>(praw);
+          intptr_t pcid = -1;
+          if (praw != Object::null() && (pv & kHeapObjectTag) != 0) {
+            pcid = praw->GetClassIdOfHeapObject();
+          }
+          OS::PrintErr("[maot]   peer[%" Pd "] raw=0x%" Px " cid=%" Pd "\n", n,
+                       pv, pcid);
+          if (++n >= 6) break;
+        }
+      }
+    }
+    destination_ = GetTarget(call);
+    // GATED. This block was running UNCONDITIONALLY -- only MaotRelocTrace
+    // inside it was flag-checked. ClassifyCodePointer walks the whole
+    // registry for every call target (5098 entries under select-all), calling
+    // FieldAt, HasCode, CurrentCode and ToCString, the last of which copies
+    // string characters. That is a per-call O(registry) walk with allocation,
+    // inside the relocation loop. Diagnostics must not run when not asked for.
+    if (FLAG_maot_trace_serializer) {
       // Destination provenance BEFORE anything derived from instructions_ is
       // touched. The classifier compares pointers only and never dereferences
       // the candidate.
