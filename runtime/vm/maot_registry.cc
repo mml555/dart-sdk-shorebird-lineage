@@ -1108,6 +1108,14 @@ CodePtr MaotRegistry::TrampolineAt(Thread* thread, intptr_t entry) {
   return raw == Object::null() ? Code::null() : Code::RawCast(raw);
 }
 
+CodePtr MaotRegistry::CurrentCodeAt(Thread* thread, intptr_t entry) {
+  if (entry < 0 || entry >= Length(thread)) return Code::null();
+  const ObjectPtr raw = FieldAt(thread, entry, kCurrentCode);
+  if (raw == Object::null()) return Code::null();
+  if (raw->GetClassIdOfHeapObject() != kCodeCid) return Code::null();
+  return Code::RawCast(raw);
+}
+
 const MaotRegistry::EntryField MaotRegistry::kPinnedCodeFields[3] = {
     kCurrentCode, kReleaseCode, kTrampolineCode};
 

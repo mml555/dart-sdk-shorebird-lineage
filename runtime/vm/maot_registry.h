@@ -363,6 +363,10 @@ class MaotRegistry : public AllStatic {
                                intptr_t entry,
                                const Code& trampoline);
   static CodePtr TrampolineAt(Thread* thread, intptr_t entry);
+  // The declaration's pinned implementation body, by entry. Needed to
+  // partition installed declarations against pinned bodies without the
+  // caller knowing the entry layout.
+  static CodePtr CurrentCodeAt(Thread* thread, intptr_t entry);
   // Entry point of `function`'s declaration trampoline, or 0 when it has
   // none. For comparing against a switchable-call state that stores a raw
   // address rather than a Code pointer.

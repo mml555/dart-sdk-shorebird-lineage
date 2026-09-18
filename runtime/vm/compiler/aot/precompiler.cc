@@ -3504,6 +3504,47 @@ void Precompiler::VerifyPinnedBodyTraversal() {
   // it is the program being unable to carry the claim. Failing it would be as
   // misleading as passing it silently, so it reports as PASS_LEAF_ONLY and the
   // harness requires at least one non-leaf row across the suite.
+  // Partition of installed declarations against pinned bodies. The traversal
+  // list dedups by Code pointer, so declarations sharing a body collapse into
+  // one pin -- a difference between the two counts is expected, but it must be
+  // accounted for rather than assumed benign.
+  {
+    Thread* const th = T;
+    const intptr_t entries = MaotRegistry::Length(th);
+    intptr_t no_body = 0, body_is_tramp = 0, shared_body = 0, unique_body = 0;
+    GrowableArray<uword> seen;
+    auto& b = Object::Handle(z);
+    for (intptr_t i = 0; i < entries; i++) {
+      b = MaotRegistry::CurrentCodeAt(th, i);
+      if (b.IsNull() || !b.IsCode()) {
+        no_body++;
+        continue;
+      }
+      if (MaotRegistry::IsTrampolineCode(th, b.ptr())) {
+        body_is_tramp++;
+        continue;
+      }
+      const uword raw = static_cast<uword>(b.ptr());
+      bool dup = false;
+      for (intptr_t k = 0; k < seen.length(); k++) {
+        if (seen[k] == raw) { dup = true; break; }
+      }
+      if (dup) {
+        shared_body++;
+      } else {
+        seen.Add(raw);
+        unique_body++;
+      }
+    }
+    OS::PrintErr("[maot] BODY_PARTITION entries=%" Pd " unique_body=%" Pd
+                 " shared_body=%" Pd " no_body=%" Pd " body_is_trampoline=%" Pd
+                 " sum=%" Pd " remainder=%" Pd "\n",
+                 entries, unique_body, shared_body, no_body, body_is_tramp,
+                 unique_body + shared_body + no_body + body_is_tramp,
+                 entries - (unique_body + shared_body + no_body +
+                            body_is_tramp));
+  }
+
   const bool structurally_ok = (pins.length() > 0) && (missing == 0) &&
                                (multiply == 0) &&
                                (visited_once == pins.length()) &&
