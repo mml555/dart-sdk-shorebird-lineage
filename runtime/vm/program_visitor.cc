@@ -364,6 +364,9 @@ class Deduper : public ValueObject {
 // checked: a cell-indirect site records no static-call-table entry, therefore
 // no mutable declaration may ever appear here as a bound target. Counted, not
 // asserted in prose -- a non-zero count is the falsification.
+static intptr_t g_maot_codes_visited = 0;
+static intptr_t g_maot_tables_nonempty = 0;
+static intptr_t g_maot_pcrel_total = 0;
 static intptr_t g_maot_bound_call_via_code = 0;
 static intptr_t g_maot_bound_mutable_targets = 0;
 static intptr_t g_maot_pcrel_mutable_targets = 0;
@@ -380,8 +383,10 @@ void ProgramVisitor::BindStaticCalls(Thread* thread) {
           maot_probe_(Function::Handle(zone)) {}
 
     void VisitCode(const Code& code) {
+      g_maot_codes_visited++;
       table_ = code.static_calls_target_table();
       if (table_.IsNull()) return;
+      if (table_.Length() > 0) g_maot_tables_nonempty++;
 
       StaticCallsTable static_calls(table_);
       // We can only remove the target table in precompiled mode, since more
@@ -395,6 +400,7 @@ void ProgramVisitor::BindStaticCalls(Thread* thread) {
                  kind == Code::kPcRelativeTailCall ||
                  kind == Code::kPcRelativeTTSCall);
           only_call_via_code = false;
+          g_maot_pcrel_total++;
           maot_probe_ ^= view.Get<Code::kSCallTableFunctionTarget>();
           if (!maot_probe_.IsNull() &&
               MaotRegistry::IsMutableDeclaration(thread_, maot_probe_)) {
@@ -458,6 +464,9 @@ void ProgramVisitor::BindStaticCalls(Thread* thread) {
   };
 
   StackZone stack_zone(thread);
+  g_maot_codes_visited = 0;
+  g_maot_tables_nonempty = 0;
+  g_maot_pcrel_total = 0;
   g_maot_bound_call_via_code = 0;
   g_maot_bound_mutable_targets = 0;
   g_maot_pcrel_mutable_targets = 0;
@@ -465,9 +474,14 @@ void ProgramVisitor::BindStaticCalls(Thread* thread) {
   WalkProgram(thread->zone(), thread->isolate_group(), &visitor);
   // Printed unconditionally: a gate whose evidence only appears when a
   // diagnostic flag is passed cannot show that the production build is clean.
-  OS::PrintErr("[maot] GATE_D bind_static_calls call_via_code=%" Pd
+  OS::PrintErr("[maot] GATE_D bind_static_calls codes=%" Pd
+               " tables_nonempty=%" Pd
+               " pcrel_total=%" Pd
+               " call_via_code=%" Pd
                " mutable_targets_bound=%" Pd
                " pcrel_mutable_targets=%" Pd "%s\n",
+               g_maot_codes_visited, g_maot_tables_nonempty,
+               g_maot_pcrel_total,
                g_maot_bound_call_via_code, g_maot_bound_mutable_targets,
                g_maot_pcrel_mutable_targets,
                (g_maot_bound_mutable_targets + g_maot_pcrel_mutable_targets)
