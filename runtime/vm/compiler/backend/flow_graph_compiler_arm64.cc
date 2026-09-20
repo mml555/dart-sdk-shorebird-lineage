@@ -5,6 +5,7 @@
 #include "vm/globals.h"  // Needed here to get TARGET_ARCH_ARM64.
 #if defined(TARGET_ARCH_ARM64)
 
+#include "vm/compiler/aot/precompiler.h"
 #include "vm/compiler/backend/flow_graph_compiler.h"
 #include "vm/maot_registry.h"
 
@@ -427,6 +428,13 @@ void FlowGraphCompiler::GenerateStaticDartCall(intptr_t deopt_id,
         zone(), MaotRegistry::DispatchCellForFunction(thread(), target));
     if (!cell.IsNull()) {
       MaotRegistry::NoteCallSiteEmitted(thread(), target);
+      // STAGE40. This lowering records no static call target, which is the
+      // edge ordinary AOT reachability walks -- removing it severed the callee
+      // graph and cost 20,597 functions. Record the release target as a
+      // reachability-only edge so the precompiler sees what it would have
+      // seen. It has no authority over where this call actually goes: the
+      // emitted instructions below still read the cell.
+      Precompiler::NoteReleaseReachabilityEdge(target);
       // Positive evidence: this optimization path kept the boundary. It is
       // recorded for the same reason the refusals are -- a lane that only
       // logs its failures cannot show that the successes were decisions.
