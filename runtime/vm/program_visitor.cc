@@ -374,6 +374,10 @@ class Deduper : public ValueObject {
 // checked: a cell-indirect site records no static-call-table entry, therefore
 // no mutable declaration may ever appear here as a bound target. Counted, not
 // asserted in prose -- a non-zero count is the falsification.
+DECLARE_FLAG(bool, maot_trace_registration);
+
+static constexpr intptr_t kMaotNamedPcrel = 40;
+static intptr_t g_maot_named_pcrel = 0;
 static intptr_t g_maot_codes_visited = 0;
 static intptr_t g_maot_tables_nonempty = 0;
 static intptr_t g_maot_pcrel_total = 0;
@@ -412,9 +416,23 @@ void ProgramVisitor::BindStaticCalls(Thread* thread) {
           only_call_via_code = false;
           g_maot_pcrel_total++;
           maot_probe_ ^= view.Get<Code::kSCallTableFunctionTarget>();
-          if (!maot_probe_.IsNull() &&
-              MaotRegistry::IsMutableDeclaration(thread_, maot_probe_)) {
-            g_maot_pcrel_mutable_targets++;
+          if (!maot_probe_.IsNull()) {
+            const bool mutable_target =
+                MaotRegistry::IsMutableDeclaration(thread_, maot_probe_);
+            if (mutable_target) g_maot_pcrel_mutable_targets++;
+            // The counter read zero in BOTH arms, which is the shape of a
+            // probe that is looking at the wrong object. Name the targets that
+            // belong to the subject package so "no mutable target" can be told
+            // apart from "the lookup does not recognise these Functions".
+            if (FLAG_maot_trace_registration &&
+                g_maot_named_pcrel < kMaotNamedPcrel) {
+              const char* n = maot_probe_.ToFullyQualifiedCString();
+              if (strstr(n, "m5gatec") != nullptr) {
+                g_maot_named_pcrel++;
+                OS::PrintErr("[maot] GATE_D pcrel target mutable=%d %s\n",
+                             mutable_target ? 1 : 0, n);
+              }
+            }
           }
           continue;
         }
@@ -474,6 +492,7 @@ void ProgramVisitor::BindStaticCalls(Thread* thread) {
   };
 
   StackZone stack_zone(thread);
+  g_maot_named_pcrel = 0;
   g_maot_codes_visited = 0;
   g_maot_tables_nonempty = 0;
   g_maot_pcrel_total = 0;
