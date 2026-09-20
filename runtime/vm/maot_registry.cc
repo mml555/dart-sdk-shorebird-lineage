@@ -13,7 +13,9 @@
 #include "vm/flags.h"
 #include "vm/heap/safepoint.h"
 #include "vm/isolate.h"
+#include "platform/growable_array.h"
 #include "vm/json_writer.h"
+#include "vm/os_thread.h"
 #include "vm/object_store.h"
 #include "vm/symbols.h"
 #include "vm/thread.h"
@@ -705,28 +707,48 @@ const char* MaotRegistry::DispositionName(Disposition d) {
   return "UNKNOWN";
 }
 
-static GrowableObjectArrayPtr EnsureDecisions(Thread* thread) {
-  auto* object_store = thread->isolate_group()->object_store();
-  if (object_store->maot_decisions() == GrowableObjectArray::null()) {
-    object_store->set_maot_decisions(GrowableObjectArray::Handle(
-        thread->zone(), GrowableObjectArray::New(Heap::kOld)));
-  }
-  return object_store->maot_decisions();
+// DIAGNOSTIC-ONLY STORAGE (#69, STAGE39).
+//
+// The decision log used to be a GrowableObjectArray of Dart Strings hung off
+// the ObjectStore. That made the evidence apparatus part of the production
+// data model: every record was a heap object reachable from a snapshot root,
+// and the prose serialized into .rodata -- 8.53 MB of the 9.10 MB regression.
+//
+// The audit is what licenses moving it wholesale rather than trimming fields:
+// StageReplacement gates on kEscapeCount, a Smi on the descriptor projected by
+// NoteEscapeById, and BlockingRecordsFor's only caller is DumpToFile. No
+// production path reads this log at all, so no production sink is needed.
+//
+// It is now plain process-owned C++ memory. It cannot be reached from the
+// ObjectStore, cannot be traced by the serializer, and cannot appear in a
+// snapshot -- by construction rather than by policy.
+struct MaotDecisionRecord {
+  char* field[kDecisionSlots];
+};
+
+static Mutex* MaotDecisionsMutex() {
+  static Mutex* mutex = new Mutex();
+  return mutex;
+}
+
+static MallocGrowableArray<MaotDecisionRecord>* MaotDecisionLog() {
+  static MallocGrowableArray<MaotDecisionRecord>* log =
+      new MallocGrowableArray<MaotDecisionRecord>();
+  return log;
 }
 
 intptr_t MaotRegistry::DecisionCount(Thread* thread) {
-  const auto& storage =
-      GrowableObjectArray::Handle(thread->zone(), EnsureDecisions(thread));
-  return storage.Length() / kDecisionSlots;
+  MutexLocker ml(MaotDecisionsMutex());
+  return MaotDecisionLog()->length();
 }
 
 void MaotRegistry::ClearDecisions(Thread* thread) {
-  // Replace the storage, never SetLength(0): the backing Array keeps every
-  // slot past the new length, and both the GC and the serializer walk the
-  // backing array. #66 paid for that lesson once.
-  thread->isolate_group()->object_store()->set_maot_decisions(
-      GrowableObjectArray::Handle(thread->zone(),
-                                  GrowableObjectArray::New(Heap::kOld)));
+  MutexLocker ml(MaotDecisionsMutex());
+  auto* log = MaotDecisionLog();
+  for (intptr_t i = 0; i < log->length(); i++) {
+    for (intptr_t f = 0; f < kDecisionSlots; f++) free((*log)[i].field[f]);
+  }
+  log->Clear();
 }
 
 void MaotRegistry::NoteDecision(Thread* thread,
@@ -736,43 +758,34 @@ void MaotRegistry::NoteDecision(Thread* thread,
                                 const char* decision,
                                 Disposition disposition) {
   if (declaration_id.IsNull()) return;
-  Zone* zone = thread->zone();
-  const auto& storage =
-      GrowableObjectArray::Handle(zone, EnsureDecisions(thread));
-  storage.Add(declaration_id, Heap::kOld);
-  storage.Add(caller_id.IsNull()
-                  ? String::Handle(zone, String::New("<diagnostic:unindexed "
-                                                     "caller>", Heap::kOld))
-                  : caller_id,
-              Heap::kOld);
-  storage.Add(String::Handle(zone, String::New(optimization_class, Heap::kOld)),
-              Heap::kOld);
-  storage.Add(String::Handle(zone, String::New(decision, Heap::kOld)),
-              Heap::kOld);
-  storage.Add(String::Handle(zone,
-                             String::New(DispositionName(disposition),
-                                         Heap::kOld)),
-              Heap::kOld);
-  // Which decision reads this record. Recorded ON the record so a reader can
-  // check the claim rather than take the lane's word for it -- and the string
-  // is DIAGNOSTIC. The proof that a record is consumed is that its escape
-  // projection survives into the descriptor and StageReplacement refuses on
-  // it; a record can outlive its projection, which is exactly what
-  // --maot_drop_escape_state_at_materialization produces.
+
+  // The escape projection happens FIRST and is entirely independent of the
+  // diagnostic record below. It writes kEscapeCount on the descriptor, which
+  // is what StageReplacement actually refuses on. Moving the log out of the
+  // Dart heap therefore cannot weaken fail-closed behaviour.
+  if (BlocksInstallation(disposition)) {
+    NoteEscapeById(thread, declaration_id, decision);
+  }
+
   const char* consumed_by =
       "no install decision reads a slot-preserving record; it is positive "
-      "evidence that the boundary survived";
+      "evidence, not a gate";
   if (BlocksInstallation(disposition)) {
     consumed_by =
         "MaotRegistry::StageReplacement refuses installation while this "
         "disposition stands";
   }
-  storage.Add(String::Handle(zone, String::New(consumed_by, Heap::kOld)),
-              Heap::kOld);
-
-  if (BlocksInstallation(disposition)) {
-    NoteEscapeById(thread, declaration_id, decision);
-  }
+  MaotDecisionRecord rec;
+  rec.field[kDecDeclarationId] = Utils::StrDup(declaration_id.ToCString());
+  rec.field[kDecCallerId] = Utils::StrDup(
+      caller_id.IsNull() ? "<diagnostic:unindexed caller>"
+                         : caller_id.ToCString());
+  rec.field[kDecClass] = Utils::StrDup(optimization_class);
+  rec.field[kDecDecision] = Utils::StrDup(decision);
+  rec.field[kDecDisposition] = Utils::StrDup(DispositionName(disposition));
+  rec.field[kDecConsumedBy] = Utils::StrDup(consumed_by);
+  MutexLocker ml(MaotDecisionsMutex());
+  MaotDecisionLog()->Add(rec);
 }
 
 StringPtr MaotRegistry::AnyDeclarationIdOf(Thread* thread,
@@ -1074,26 +1087,26 @@ intptr_t MaotRegistry::CellPoolIndexForFunction(Thread* thread,
 void MaotRegistry::BlockingRecordsFor(Thread* thread,
                                       const String& declaration_id,
                                       BaseTextBuffer* out) {
-  Zone* zone = thread->zone();
-  const auto& decisions =
-      GrowableObjectArray::Handle(zone, EnsureDecisions(thread));
-  if (decisions.IsNull()) return;
-  auto& id = String::Handle(zone);
-  auto& cls = String::Handle(zone);
-  auto& disp = String::Handle(zone);
+  const char* want = declaration_id.ToCString();
+  MutexLocker ml(MaotDecisionsMutex());
+  auto* log = MaotDecisionLog();
   bool first = true;
-  for (intptr_t i = 0; i + kDecisionSlots <= decisions.Length();
-       i += kDecisionSlots) {
-    id ^= decisions.At(i);
-    if (id.IsNull() || !id.Equals(declaration_id)) continue;
-    disp ^= decisions.At(i + 4);
-    if (disp.IsNull() || !disp.Equals("UNMODELED_BLOCKING")) {
-      if (disp.IsNull() || !disp.Equals("FORBIDDEN")) continue;
+  for (intptr_t i = 0; i < log->length(); i++) {
+    const MaotDecisionRecord& rec = (*log)[i];
+    if (rec.field[kDecDeclarationId] == nullptr ||
+        strcmp(rec.field[kDecDeclarationId], want) != 0) {
+      continue;
     }
-    cls ^= decisions.At(i + 2);
-    if (cls.IsNull()) continue;
+    const char* disp = rec.field[kDecDisposition];
+    if (disp == nullptr) continue;
+    if (strcmp(disp, "UNMODELED_BLOCKING") != 0 &&
+        strcmp(disp, "FORBIDDEN") != 0) {
+      continue;
+    }
+    const char* cls = rec.field[kDecClass];
+    if (cls == nullptr) continue;
     if (!first) out->AddString(", ");
-    out->AddString(cls.ToCString());
+    out->AddString(cls);
     first = false;
   }
 }
@@ -2334,19 +2347,16 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
   // disposition, and which decision consumes it.
   writer.OpenArray("optimizer_decisions");
   {
-    const auto& decisions =
-        GrowableObjectArray::Handle(zone, EnsureDecisions(thread));
-    auto& field = String::Handle(zone);
-    const intptr_t n = decisions.Length() / kDecisionSlots;
-    for (intptr_t i = 0; i < n; i++) {
+    MutexLocker ml(MaotDecisionsMutex());
+    auto* log = MaotDecisionLog();
+    static const char* const kNames[kDecisionSlots] = {
+        "declaration_id", "caller_id", "optimization_class",
+        "decision", "disposition", "consumed_by"};
+    for (intptr_t i = 0; i < log->length(); i++) {
       writer.OpenObject();
-      static const char* const kNames[kDecisionSlots] = {
-          "declaration_id", "caller_id", "optimization_class",
-          "decision", "disposition", "consumed_by"};
       for (intptr_t f = 0; f < kDecisionSlots; f++) {
-        field ^= decisions.At(i * kDecisionSlots + f);
-        writer.PrintProperty(kNames[f],
-                             field.IsNull() ? "<absent>" : field.ToCString());
+        const char* v = (*log)[i].field[f];
+        writer.PrintProperty(kNames[f], v == nullptr ? "<absent>" : v);
       }
       writer.CloseObject();
     }
