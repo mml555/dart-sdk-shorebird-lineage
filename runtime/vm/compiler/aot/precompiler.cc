@@ -980,7 +980,12 @@ void Precompiler::AddRoots() {
       retain_root_library_caches_ = true;
     }
     AddRetainReason(main, RetainReasons::kMainFunction);
-    AddTypesOf(main);
+    {
+      const char* const saved_site = reach_retain_site_;
+      reach_retain_site_ = "retain:main";
+      AddTypesOf(main);
+      reach_retain_site_ = saved_site;
+    }
     // Create closure object from main.
     main = main.ImplicitClosureFunction();
     AddConstObject(Closure::Handle(main.ImplicitStaticClosure()));
@@ -1260,11 +1265,17 @@ void Precompiler::AddCalleesOf(const Function& function, intptr_t gop_offset) {
   if (!FLAG_dwarf_stack_traces_mode) {
     const Array& inlined_functions =
         Array::Handle(Z, code.inlined_id_to_function());
+    // Retention from here is INLINE METADATA: the callee has no call site of
+    // its own in this caller, it is only named by the caller's inline tree so
+    // that a stack trace can be symbolized.
+    const char* const saved_site = reach_retain_site_;
+    reach_retain_site_ = "retain:inline-tree";
     for (intptr_t i = 0; i < inlined_functions.Length(); i++) {
       target ^= inlined_functions.At(i);
       AddRetainReason(target, RetainReasons::kSymbolicStackTraces);
       AddTypesOf(target);
     }
+    reach_retain_site_ = saved_site;
   }
 
   // Edges discovered after this point belong to no caller.
@@ -1327,7 +1338,10 @@ void Precompiler::AddCalleesOfHelper(const Object& entry,
         if (!callback_target.IsNull()) {
           AddFunction(callback_target, RetainReasons::kFfiCallbackTarget);
         }
+        const char* const saved_site = reach_retain_site_;
+        reach_retain_site_ = "retain:ffi-callback";
         AddTypesOf(target);
+        reach_retain_site_ = saved_site;
       }
       break;
     }
@@ -1381,7 +1395,7 @@ void Precompiler::AddTypesOf(const Function& function) {
   // --maot_dump_retained prints. Logging it makes the edge graph a complete
   // explanation of that set: a retained declaration with no AddFunction edge
   // and only this one was not reached by a call at all.
-  MaotLogReachEdge(function, "retain:AddTypesOf");
+  MaotLogReachEdge(function, reach_retain_site_);
 
   if (retained_reasons_writer_ != nullptr &&
       !retained_reasons_writer_->HasReason(function)) {
@@ -1419,8 +1433,11 @@ void Precompiler::AddTypesOf(const Function& function) {
     // Attribute the parent's retention to the child that dragged it in; this
     // is the one structural edge that has no corresponding call site.
     const Function& saved_caller = Function::Handle(Z, reach_caller_.ptr());
+    const char* const saved_site = reach_retain_site_;
     reach_caller_ = function.ptr();
+    reach_retain_site_ = "retain:local-parent";
     AddTypesOf(parent_function);
+    reach_retain_site_ = saved_site;
     reach_caller_ = saved_caller.ptr();
     return;
   }
@@ -1775,7 +1792,10 @@ void Precompiler::SeedMutableAotRoots() {
     const bool had_code_before = fn.HasCode();
     if (!FLAG_maot_disable_retention_roots) {
       AddFunction(fn, RetainReasons::kMutableAotDeclaration);
+      const char* const saved_site = reach_retain_site_;
+      reach_retain_site_ = "retain:maot-declaration";
       AddTypesOf(fn);  // retains the owning class and its type graph
+      reach_retain_site_ = saved_site;
     }
     if (FLAG_maot_trace_registration) {
       OS::PrintErr("[maot] seed %s possibly_retained_before=%d seen_before=%d "
