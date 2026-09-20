@@ -2429,6 +2429,84 @@ MAOT_TEST_EXPORT int64_t Dart_MaotInstallForTesting(const char* declaration_id,
                                          static_cast<intptr_t>(version), ns);
 }
 
+// GATE C. The instruction words of a declaration's PINNED BODY, plus a digest
+// of them.
+//
+// #67's lowering is four instructions that load the callee's dispatch cell and
+// branch through it. Two separate claims are made about that sequence across
+// an installation -- that it is still cell-indirect, and that nothing rewrote
+// it -- and both were previously arguments rather than measurements. This
+// returns the bytes so the first can be DECODED, and a digest so the second is
+// a comparison of three numbers.
+//
+// Reads the pinned body, not Function::CurrentCode(): for a mutable
+// declaration the latter is the trampoline, which is not the code that holds
+// the call sites.
+MAOT_TEST_EXPORT int64_t Dart_MaotBodyWordsForTesting(
+    const char* declaration_id,
+    const char* out_path) {
+  Thread* thread = Thread::Current();
+  if (thread == nullptr) return -10;
+  TransitionNativeToVM transition(thread);
+  StackZone stack_zone(thread);
+  HANDLESCOPE(thread);
+  Zone* zone = thread->zone();
+  const auto& id =
+      String::Handle(zone, String::New(declaration_id, Heap::kOld));
+  const intptr_t entry = MaotRegistry::IndexOf(thread, id);
+  if (entry < 0) return -1;
+  const auto& code =
+      Code::Handle(zone, MaotRegistry::CurrentCodeAt(thread, entry));
+  if (code.IsNull()) return -2;
+  const uword start = code.PayloadStart();
+  const intptr_t size = code.Size();
+  if (size <= 0) return -3;
+  uint64_t digest = 1469598103934665603ULL;  // FNV-1a 64
+  FILE* out = (out_path != nullptr && out_path[0] != '\0')
+                  ? fopen(out_path, "w")
+                  : nullptr;
+  if (out != nullptr) {
+    fprintf(out, "declaration %s\nsize %" Pd "\n", declaration_id, size);
+  }
+  for (intptr_t off = 0; off + 4 <= size; off += 4) {
+    const uint32_t w = *reinterpret_cast<uint32_t*>(start + off);
+    for (intptr_t b = 0; b < 4; b++) {
+      digest ^= static_cast<uint8_t>(w >> (8 * b));
+      digest *= 1099511628211ULL;
+    }
+    if (out != nullptr) fprintf(out, "%08x\n", w);
+  }
+  if (out != nullptr) fclose(out);
+  return static_cast<int64_t>(digest & 0x7fffffffffffffffULL);
+}
+
+// GATE C. The global-pool byte offset of a declaration's dispatch cell.
+//
+// The decoded `ldr xN,[PP,#off]` in the words above has to be resolved to a
+// DECLARATION, otherwise "a cell is loaded here" is not the same claim as
+// "this callee's cell is loaded here". Returns the offset the assembler
+// encodes, or -1 if the declaration has no seeded pool entry.
+MAOT_TEST_EXPORT int64_t Dart_MaotCellPoolOffsetForTesting(
+    const char* declaration_id) {
+  Thread* thread = Thread::Current();
+  if (thread == nullptr) return -10;
+  TransitionNativeToVM transition(thread);
+  StackZone stack_zone(thread);
+  HANDLESCOPE(thread);
+  Zone* zone = thread->zone();
+  const auto& id =
+      String::Handle(zone, String::New(declaration_id, Heap::kOld));
+  const intptr_t entry = MaotRegistry::IndexOf(thread, id);
+  if (entry < 0) return -1;
+  const intptr_t index = MaotRegistry::CellPoolIndexAt(thread, entry);
+  if (index < 0) return -2;
+  // The runtime class, not compiler::target::, because this runs in the AOT
+  // runtime where the compiler-side target description is not linked in. They
+  // agree for an arm64 target on an arm64 host, which is the only shape #67
+  // lowers for.
+  return static_cast<int64_t>(ObjectPool::element_offset(index));
+}
+
 // ROUTING DIAGNOSTIC ONLY -- this is NOT installation.
 //
 // Writes both halves of a declaration's cell directly, bypassing

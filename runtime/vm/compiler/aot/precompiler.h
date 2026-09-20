@@ -425,6 +425,12 @@ class Precompiler : public ValueObject {
   // a GC root during precompilation and unreachable from any snapshot root.
   GrowableObjectArray& pending_release_edges_;
   Function& reach_caller_;
+  // WHY the declaration being inserted is retained, not merely that it is.
+  // The routing-neutrality gate has to separate a declaration kept by a real
+  // structural dependency from one kept only because it appears in another
+  // function's inline metadata, and "it was inserted by AddTypesOf" does not
+  // distinguish those.
+  const char* reach_retain_site_ = "retain:program-walk";
   intptr_t release_edges_recorded_ = 0;
   intptr_t release_edges_consumed_ = 0;
   intptr_t release_edges_missing_ = 0;

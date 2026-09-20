@@ -358,14 +358,26 @@ class Deduper : public ValueObject {
   DirectChainedHashMap<S> canonical_objects_;
 };
 
+// GATE D. The Mutable-AOT reachability edge exists so the precompiler sees a
+// callee graph; it must never become a binding. This binder is where a static
+// call site is turned back into a fixed target, so it is where the claim is
+// checked: a cell-indirect site records no static-call-table entry, therefore
+// no mutable declaration may ever appear here as a bound target. Counted, not
+// asserted in prose -- a non-zero count is the falsification.
+static intptr_t g_maot_bound_call_via_code = 0;
+static intptr_t g_maot_bound_mutable_targets = 0;
+static intptr_t g_maot_pcrel_mutable_targets = 0;
+
 void ProgramVisitor::BindStaticCalls(Thread* thread) {
   class BindStaticCallsVisitor : public CodeVisitor {
    public:
-    explicit BindStaticCallsVisitor(Zone* zone)
-        : table_(Array::Handle(zone)),
+    explicit BindStaticCallsVisitor(Thread* thread, Zone* zone)
+        : thread_(thread),
+          table_(Array::Handle(zone)),
           kind_and_offset_(Smi::Handle(zone)),
           target_(Object::Handle(zone)),
-          target_code_(Code::Handle(zone)) {}
+          target_code_(Code::Handle(zone)),
+          maot_probe_(Function::Handle(zone)) {}
 
     void VisitCode(const Code& code) {
       table_ = code.static_calls_target_table();
@@ -383,6 +395,11 @@ void ProgramVisitor::BindStaticCalls(Thread* thread) {
                  kind == Code::kPcRelativeTailCall ||
                  kind == Code::kPcRelativeTTSCall);
           only_call_via_code = false;
+          maot_probe_ ^= view.Get<Code::kSCallTableFunctionTarget>();
+          if (!maot_probe_.IsNull() &&
+              MaotRegistry::IsMutableDeclaration(thread_, maot_probe_)) {
+            g_maot_pcrel_mutable_targets++;
+          }
           continue;
         }
 
@@ -410,6 +427,10 @@ void ProgramVisitor::BindStaticCalls(Thread* thread) {
         // Cf. runtime entry PatchStaticCall called from CallStaticFunction
         // stub.
         const auto& fun = Function::Cast(target_);
+        g_maot_bound_call_via_code++;
+        if (MaotRegistry::IsMutableDeclaration(thread_, fun)) {
+          g_maot_bound_mutable_targets++;
+        }
         ASSERT(!FLAG_precompiled_mode || fun.HasCode());
         target_code_ = fun.HasCode() ? fun.CurrentCode()
                                      : StubCode::CallStaticFunction().ptr();
@@ -428,15 +449,29 @@ void ProgramVisitor::BindStaticCalls(Thread* thread) {
     }
 
    private:
+    Thread* thread_;
     Array& table_;
     Smi& kind_and_offset_;
     Object& target_;
     Code& target_code_;
+    Function& maot_probe_;
   };
 
   StackZone stack_zone(thread);
-  BindStaticCallsVisitor visitor(thread->zone());
+  g_maot_bound_call_via_code = 0;
+  g_maot_bound_mutable_targets = 0;
+  g_maot_pcrel_mutable_targets = 0;
+  BindStaticCallsVisitor visitor(thread, thread->zone());
   WalkProgram(thread->zone(), thread->isolate_group(), &visitor);
+  // Printed unconditionally: a gate whose evidence only appears when a
+  // diagnostic flag is passed cannot show that the production build is clean.
+  OS::PrintErr("[maot] GATE_D bind_static_calls call_via_code=%" Pd
+               " mutable_targets_bound=%" Pd
+               " pcrel_mutable_targets=%" Pd "%s\n",
+               g_maot_bound_call_via_code, g_maot_bound_mutable_targets,
+               g_maot_pcrel_mutable_targets,
+               (g_maot_bound_mutable_targets + g_maot_pcrel_mutable_targets)
+                   ? "  <-- A MUTABLE DECLARATION WAS BOUND" : "");
 }
 
 DECLARE_FLAG(charp, trace_precompiler_to);
