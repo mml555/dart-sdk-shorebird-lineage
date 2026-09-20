@@ -77,6 +77,15 @@ DEFINE_FLAG(charp,
             "measured rather than argued from the enum.");
 
 DEFINE_FLAG(charp,
+            maot_dump_reach_edges,
+            nullptr,
+            "Write one caller->callee reachability edge per line to this path "
+            "as the precompiler discovers it, with the retain reason as the "
+            "edge kind. Exists so a baseline graph and a Mutable-AOT graph can "
+            "be diffed directly instead of inferring cause from which "
+            "declarations survived.");
+
+DEFINE_FLAG(charp,
             maot_dump_retained,
             nullptr,
             "Write one fully-qualified name per retained Function to this "
