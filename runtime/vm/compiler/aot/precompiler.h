@@ -322,6 +322,7 @@ class Precompiler : public ValueObject {
   // call target. Reachability-only: no codegen, binding, relocation or
   // runtime consumer.
   static void NoteReleaseReachabilityEdge(const Function& release_target);
+  static void MaotLogReachEdge(const Function& callee, const char* kind);
 
  private:
   void AddCalleesOfHelper(const Object& entry,
@@ -423,6 +424,7 @@ class Precompiler : public ValueObject {
   // AddCalleesOf. Held by the Precompiler, never by the ObjectStore, so it is
   // a GC root during precompilation and unreachable from any snapshot root.
   GrowableObjectArray& pending_release_edges_;
+  Function& reach_caller_;
   intptr_t release_edges_recorded_ = 0;
   intptr_t release_edges_consumed_ = 0;
   intptr_t release_edges_missing_ = 0;

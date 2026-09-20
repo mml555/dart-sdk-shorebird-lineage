@@ -163,6 +163,7 @@ namespace {
 }  // namespace
 
 DECLARE_FLAG(bool, maot_verify_pinned_body_traversal);
+DECLARE_FLAG(charp, maot_dump_reach_edges);
 DECLARE_FLAG(bool, print_flow_graph);
 DECLARE_FLAG(bool, print_flow_graph_optimized);
 DECLARE_FLAG(bool, trace_compiler);
@@ -540,6 +541,7 @@ Precompiler::Precompiler(Thread* thread)
           HashTables::New<FunctionSet>(/*initial_capacity=*/1024)),
       pending_release_edges_(GrowableObjectArray::Handle(
           thread->zone(), GrowableObjectArray::New())),
+      reach_caller_(Function::Handle(thread->zone())),
       classes_to_retain_(),
       typeargs_to_retain_(),
       types_to_retain_(),
@@ -1092,6 +1094,10 @@ void Precompiler::ProcessFunction(const Function& function) {
   TracingScope tracing_scope(this);
   function_count_++;
 
+  // STAGE40 edge attribution: every edge discovered while this function is
+  // compiled and while its pool is walked is an edge OUT of this function.
+  reach_caller_ = function.ptr();
+
   if (FLAG_trace_precompiler) {
     THR_Print("Precompiling %" Pd " %s (%s, %s)\n", function_count_,
               function.ToLibNamePrefixedQualifiedCString(),
@@ -1106,6 +1112,31 @@ void Precompiler::ProcessFunction(const Function& function) {
   // Used in the JIT to save type-feedback across compilations.
   function.ClearICDataArray();
   AddCalleesOf(function, gop_offset);
+}
+
+// STAGE40 differential instrumentation. One line per discovered edge:
+//   caller \t callee \t kind
+// The caller is whichever function's callees are being walked; edges added
+// outside such a walk are attributed to <root>, which is exactly the
+// distinction needed to tell a missing call edge from a missing root.
+static FILE* g_maot_edge_file = nullptr;
+void Precompiler::MaotLogReachEdge(const Function& callee, const char* kind) {
+  if (FLAG_maot_dump_reach_edges == nullptr) return;
+  if (g_maot_edge_file == nullptr) {
+    g_maot_edge_file = fopen(FLAG_maot_dump_reach_edges, "w");
+    if (g_maot_edge_file == nullptr) return;
+  }
+  Precompiler* p = Precompiler::Instance();
+  const char* caller = "<root>";
+  if (p != nullptr && !p->reach_caller_.IsNull()) {
+    caller = p->reach_caller_.ToFullyQualifiedCString();
+  }
+  fprintf(g_maot_edge_file, "%s\t%s\t%s\n", caller,
+          callee.IsNull() ? "<null>" : callee.ToFullyQualifiedCString(),
+          kind == nullptr ? "<none>" : kind);
+  // Flushed per line: gen_snapshot can leave through paths that do not run
+  // stdio teardown, and a truncated edge log reads exactly like a missing edge.
+  fflush(g_maot_edge_file);
 }
 
 // STAGE40. Recorded by the ARM64 backend when it emits a cell-indirect call,
@@ -1235,6 +1266,9 @@ void Precompiler::AddCalleesOf(const Function& function, intptr_t gop_offset) {
       AddTypesOf(target);
     }
   }
+
+  // Edges discovered after this point belong to no caller.
+  reach_caller_ = Function::null();
 }
 
 static bool IsPotentialClosureCall(const String& selector) {
@@ -2669,6 +2703,7 @@ void Precompiler::AddFunction(const Function& function,
   if (retain_reason == nullptr) {
     retain_reason = MustRetainFunction(function);
   }
+  MaotLogReachEdge(function, retain_reason);
   // Add even if we've already marked this function as possibly retained
   // because this could be an additional reason for doing so.
   AddRetainReason(function, retain_reason);
