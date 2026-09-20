@@ -263,6 +263,13 @@ struct RetainReasons : public AllStatic {
   // Selection is a RETENTION REASON: a declaration cannot be promised
   // patchable after release if the release compiler was free to erase its
   // implementation before shipping.
+  // STAGE40. Reached through a mutable call site's RELEASE REACHABILITY EDGE:
+  // the callee ordinary AOT would have discovered from that call before #67
+  // replaced the static target with cell indirection. It is an edge, not a
+  // root -- it only fires while walking a caller that is already reachable.
+  static constexpr const char* kMutableAotReleaseReachability =
+      "a reachable caller holds a mutable indirect call whose release target "
+      "ordinary AOT reachability would have discovered";
   static constexpr const char* kMutableAotDeclaration =
       "mutable-aot declaration";
   // The object has an entry point pragma that requires it be retained.
@@ -531,6 +538,8 @@ Precompiler::Precompiler(Thread* thread)
       fields_to_retain_(),
       functions_to_retain_(
           HashTables::New<FunctionSet>(/*initial_capacity=*/1024)),
+      pending_release_edges_(GrowableObjectArray::Handle(
+          thread->zone(), GrowableObjectArray::New())),
       classes_to_retain_(),
       typeargs_to_retain_(),
       types_to_retain_(),
@@ -759,6 +768,10 @@ void Precompiler::DoCompileAll() {
 
       FinalizeDispatchTable();
       VerifyMaotDispatchTableTargets();
+      OS::PrintErr("[maot] RELEASE_EDGES recorded=%" Pd " consumed=%" Pd
+                   " missing=%" Pd " pending_at_end=%" Pd "\n",
+                   release_edges_recorded_, release_edges_consumed_,
+                   release_edges_missing_, pending_release_edges_.Length());
       DumpMaotCallerCode("A-before-ReplaceFunctionStaticCallEntries");
       ReplaceFunctionStaticCallEntries();
       DumpMaotCallerCode("B-after-ReplaceFunctionStaticCallEntries");
@@ -1095,9 +1108,40 @@ void Precompiler::ProcessFunction(const Function& function) {
   AddCalleesOf(function, gop_offset);
 }
 
+// STAGE40. Recorded by the ARM64 backend when it emits a cell-indirect call,
+// drained by AddCalleesOf for the caller that emitted it. Never consulted by
+// code generation, binding, relocation, the cell, the trampoline or
+// StageReplacement -- it exists only so the reachability walk sees the callee
+// graph it saw before #67.
+void Precompiler::NoteReleaseReachabilityEdge(const Function& release_target) {
+  Precompiler* p = Precompiler::Instance();
+  if (p == nullptr) return;
+  if (release_target.IsNull()) {
+    p->release_edges_missing_++;
+    return;
+  }
+  p->pending_release_edges_.Add(release_target);
+  p->release_edges_recorded_++;
+}
+
 void Precompiler::AddCalleesOf(const Function& function, intptr_t gop_offset) {
   PRECOMPILER_TIMER_SCOPE(this, AddCalleesOf);
   ASSERT(function.HasCode());
+
+  // Drain the release reachability edges this caller recorded while it was
+  // being compiled. Doing it here, per reachable caller, is what makes this an
+  // EDGE and not a root: an unreachable caller is never compiled, so its
+  // edges are never recorded and its callees are never added.
+  if (pending_release_edges_.Length() > 0) {
+    auto& edge = Function::Handle(Z);
+    for (intptr_t i = 0; i < pending_release_edges_.Length(); i++) {
+      edge ^= pending_release_edges_.At(i);
+      if (edge.IsNull()) continue;
+      AddFunction(edge, RetainReasons::kMutableAotReleaseReachability);
+      release_edges_consumed_++;
+    }
+    pending_release_edges_.SetLength(0);
+  }
 
   const Code& code = Code::Handle(Z, function.CurrentCode());
 

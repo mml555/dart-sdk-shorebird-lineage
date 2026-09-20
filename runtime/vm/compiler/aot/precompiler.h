@@ -315,6 +315,15 @@ class Precompiler : public ValueObject {
   void AddTypeParameters(const TypeParameters& params);
   void AddTypeArguments(const TypeArguments& args);
   void AddCalleesOf(const Function& function, intptr_t gop_offset);
+
+ public:
+  // STAGE40 release-only reachability edge. Called by the backend when a
+  // mutable call site is lowered to cell indirection, which records no static
+  // call target. Reachability-only: no codegen, binding, relocation or
+  // runtime consumer.
+  static void NoteReleaseReachabilityEdge(const Function& release_target);
+
+ private:
   void AddCalleesOfHelper(const Object& entry,
                           String* temp_selector,
                           Class* temp_cls);
@@ -410,6 +419,13 @@ class Precompiler : public ValueObject {
   FunctionSet possibly_retained_functions_;
   FieldSet fields_to_retain_;
   FunctionSet functions_to_retain_;
+  // Edges recorded during the CURRENT function's compilation, drained by
+  // AddCalleesOf. Held by the Precompiler, never by the ObjectStore, so it is
+  // a GC root during precompilation and unreachable from any snapshot root.
+  GrowableObjectArray& pending_release_edges_;
+  intptr_t release_edges_recorded_ = 0;
+  intptr_t release_edges_consumed_ = 0;
+  intptr_t release_edges_missing_ = 0;
   ClassSet classes_to_retain_;
   TypeArgumentsSet typeargs_to_retain_;
   AbstractTypeSet types_to_retain_;
