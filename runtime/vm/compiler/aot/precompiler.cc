@@ -1367,6 +1367,12 @@ void Precompiler::AddTypesOf(const Function& function) {
   if (functions_to_retain_.ContainsKey(function)) return;
   functions_to_retain_.Insert(function);
 
+  // This -- not AddFunction -- is the only insertion into the set that
+  // --maot_dump_retained prints. Logging it makes the edge graph a complete
+  // explanation of that set: a retained declaration with no AddFunction edge
+  // and only this one was not reached by a call at all.
+  MaotLogReachEdge(function, "retain:AddTypesOf");
+
   if (retained_reasons_writer_ != nullptr &&
       !retained_reasons_writer_->HasReason(function)) {
     FATAL("no retaining reasons given");
@@ -1400,7 +1406,12 @@ void Precompiler::AddTypesOf(const Function& function) {
   // We always retain parents if symbolic stack traces are enabled.
   if (!FLAG_dwarf_stack_traces_mode) {
     AddRetainReason(parent_function, RetainReasons::kSymbolicStackTraces);
+    // Attribute the parent's retention to the child that dragged it in; this
+    // is the one structural edge that has no corresponding call site.
+    const Function& saved_caller = Function::Handle(Z, reach_caller_.ptr());
+    reach_caller_ = function.ptr();
     AddTypesOf(parent_function);
+    reach_caller_ = saved_caller.ptr();
     return;
   }
 
@@ -3234,6 +3245,8 @@ void Precompiler::CollectDynamicFunctionNames() {
 
 void Precompiler::TraceForRetainedFunctions() {
   HANDLESCOPE(T);
+  // The fixpoint is over; edges recorded from here are structural, not calls.
+  reach_caller_ = Function::null();
   Library& lib = Library::Handle(Z);
   Class& cls = Class::Handle(Z);
   Array& functions = Array::Handle(Z);
