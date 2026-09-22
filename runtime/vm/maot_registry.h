@@ -687,6 +687,10 @@ class MaotRegistry : public AllStatic {
   // Returns an Array(kIdComponentCount) of interned components, or null when
   // the text does not render back to itself exactly -- in which case the
   // caller stores the text verbatim and nothing is lost.
+  // Renders whichever representation a field holds -- a tuple or the text.
+  static StringPtr RenderIdField(Thread* thread,
+                                 intptr_t entry,
+                                 EntryField field);
   static ArrayPtr EncodeDeclarationId(Thread* thread, const String& text);
   static StringPtr ComposeDeclarationId(Thread* thread, const Array& parts);
   static bool SplitDeclarationId(Thread* thread,

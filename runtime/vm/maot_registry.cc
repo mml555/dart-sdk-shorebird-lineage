@@ -576,15 +576,18 @@ bool MaotRegistry::Register(Thread* thread,
                  implementation.ToCString());
   }
   const auto& storage = GrowableObjectArray::Handle(zone, EnsureStorage(thread));
-  {
-    // Store the tuple when it round-trips, the text when it does not.
-    const auto& parts =
-        Array::Handle(zone, EncodeDeclarationId(thread, declaration_id));
-    if (parts.IsNull()) {
-      storage.Add(declaration_id, Heap::kOld);
-    } else {
-      storage.Add(parts, Heap::kOld);
-    }
+  // Store the tuple when it round-trips, the text when it does not. The same
+  // object is reused for the implementation ids below when they name the same
+  // declaration, which they do at registration -- otherwise the text would
+  // stay alive through those fields and the tuple would save nothing. The
+  // first attempt at this did exactly that and measured a 65,544-byte
+  // REGRESSION.
+  const auto& encoded_declaration_id =
+      Array::Handle(zone, EncodeDeclarationId(thread, declaration_id));
+  if (encoded_declaration_id.IsNull()) {
+    storage.Add(declaration_id, Heap::kOld);
+  } else {
+    storage.Add(encoded_declaration_id, Heap::kOld);
   }
   storage.Add(Smi::Handle(zone, Smi::New(selected ? 1 : 0)), Heap::kOld);
   storage.Add(Smi::Handle(zone, Smi::New(kAot)), Heap::kOld);
@@ -637,8 +640,12 @@ bool MaotRegistry::Register(Thread* thread,
     const auto& impl_id = String::Handle(zone,
         implementation_id.IsNull() ? declaration_id.ptr()
                                    : implementation_id.ptr());
-    storage.Add(impl_id, Heap::kOld);   // current implementation id
-    storage.Add(impl_id, Heap::kOld);   // release implementation id
+    const auto& stored = Object::Handle(zone,
+        (!encoded_declaration_id.IsNull() && impl_id.Equals(declaration_id))
+            ? static_cast<ObjectPtr>(encoded_declaration_id.ptr())
+            : static_cast<ObjectPtr>(impl_id.ptr()));
+    storage.Add(stored, Heap::kOld);   // current implementation id
+    storage.Add(stored, Heap::kOld);   // release implementation id
   }
   storage.Add(Object::null_object(), Heap::kOld);            // staged impl id
   storage.Add(Smi::Handle(zone, Smi::New(0)), Heap::kOld);   // escape count
@@ -1221,14 +1228,20 @@ CodePtr MaotRegistry::CellImplCodeAt(Thread* thread, intptr_t entry) {
   return raw == Object::null() ? Code::null() : Code::RawCast(raw);
 }
 
-StringPtr MaotRegistry::DeclarationIdAt(Thread* thread, intptr_t entry) {
+StringPtr MaotRegistry::RenderIdField(Thread* thread,
+                                      intptr_t entry,
+                                      EntryField field) {
   Zone* zone = thread->zone();
-  const auto& raw = Object::Handle(zone, FieldAt(thread, entry, kDeclarationId));
+  const auto& raw = Object::Handle(zone, FieldAt(thread, entry, field));
   if (raw.IsNull()) return String::null();
   if (raw.IsArray()) {
     return ComposeDeclarationId(thread, Array::Cast(raw));
   }
   return String::RawCast(raw.ptr());
+}
+
+StringPtr MaotRegistry::DeclarationIdAt(Thread* thread, intptr_t entry) {
+  return RenderIdField(thread, entry, kDeclarationId);
 }
 
 bool MaotRegistry::IsTrampolineCode(Thread* thread, ObjectPtr code) {
@@ -2383,9 +2396,9 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
       const auto& current_fn = Function::Handle(zone,
           Function::RawCast(FieldAt(thread, i, kCurrentImpl)));
       const auto& cur_id = String::Handle(zone,
-          String::RawCast(FieldAt(thread, i, kCurrentImplId)));
+          RenderIdField(thread, i, kCurrentImplId));
       const auto& rel_id = String::Handle(zone,
-          String::RawCast(FieldAt(thread, i, kReleaseImplId)));
+          RenderIdField(thread, i, kReleaseImplId));
       // The identity of what is currently installed, as a #65 DeclarationId.
       // The name diagnostics beside it are for a human reading the record;
       // nothing decides on them.
