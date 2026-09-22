@@ -3692,13 +3692,18 @@ void Precompiler::VerifyPinnedBodyTraversal() {
                             body_is_tramp));
   }
 
-  const bool structurally_ok = (pins.length() > 0) && (missing == 0) &&
-                               (multiply == 0) &&
+  const bool structurally_ok = (missing == 0) && (multiply == 0) &&
                                (visited_once == pins.length()) &&
                                (unbound == 0);
   const char* verdict;
-  if (!structurally_ok) {
-    verdict = (pins.length() == 0) ? "FAIL(no pinned bodies)" : "FAIL";
+  if (pins.length() == 0) {
+    // A build with no mutable declarations pins nothing, so the claim this
+    // verifies is not exercised. It used to read FAIL, which is how the
+    // baseline arm of every size matrix came to carry a failure verdict for
+    // being a baseline. The condition was right; the word was wrong.
+    verdict = "NOT_EXERCISED(no pinned bodies)";
+  } else if (!structurally_ok) {
+    verdict = "FAIL";
   } else if (with_calls == 0) {
     verdict = "PASS_LEAF_ONLY(binding claim not exercised)";
   } else {
