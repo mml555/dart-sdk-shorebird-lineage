@@ -2703,6 +2703,7 @@ void Precompiler::MaterializeMutableAotRegistry() {
   }
 
   MaotRegistry::Clear(T);
+  MaotRegistry::SetEncodeDeclarationIds(true);
   for (intptr_t i = 0; i < keep_ids.length(); i++) {
     const bool ok = MaotRegistry::Register(T, *keep_ids[i], keep_selected[i],
                                           *keep_fns[i], *keep_abis[i],
@@ -2716,6 +2717,7 @@ void Precompiler::MaterializeMutableAotRegistry() {
                                     *keep_escape_reasons[i]);
     ASSERT(ok);
   }
+  MaotRegistry::SetEncodeDeclarationIds(false);
   MaotRegistry::SetMaterializationStats(selected_seen, keep_ids.length(),
                                         dropped);
 
