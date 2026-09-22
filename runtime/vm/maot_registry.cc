@@ -349,7 +349,7 @@ void MaotRegistry::EntryAt(Thread* thread,
                            Function* implementation,
                            String* abi_descriptor,
                            String* call_convention) {
-  *declaration_id = String::RawCast(FieldAt(thread, index, kDeclarationId));
+  *declaration_id = DeclarationIdAt(thread, index);
   *selected = Smi::Value(Smi::RawCast(FieldAt(thread, index, kSelected))) == 1;
   *implementation = Function::RawCast(FieldAt(thread, index, kCurrentImpl));
   *abi_descriptor = String::RawCast(FieldAt(thread, index, kCurrentAbi));
@@ -378,14 +378,174 @@ void MaotRegistry::Clear(Thread* thread) {
                                   GrowableObjectArray::New(Heap::kOld)));
 }
 
+// ---------------------------------------------------------------------------
+// Declaration id: stored as a tuple, rendered as text.
+// ---------------------------------------------------------------------------
+
+static intptr_t g_maot_ids_structured = 0;
+static intptr_t g_maot_ids_verbatim = 0;
+
+intptr_t MaotRegistry::declaration_ids_structured() {
+  return g_maot_ids_structured;
+}
+intptr_t MaotRegistry::declaration_ids_verbatim() {
+  return g_maot_ids_verbatim;
+}
+
+// Grammar, exactly as the front end emits it:
+//
+//   lib:<library uri>::[cls:<owner>::]<kind>:<member>
+//
+// A library URI and an owner name never contain "::", and a member name never
+// does either -- the privacy suffix on a private member is "@<uri>", which
+// contains ':' but not "::". So the two separators are unambiguous and the
+// member is everything after the first ':' of the tail, which is what keeps
+// `op:+` and an empty `ctor:` member correct.
+bool MaotRegistry::SplitDeclarationId(Thread* thread,
+                                      const String& text,
+                                      bool intern,
+                                      String* library,
+                                      String* owner,
+                                      String* kind,
+                                      String* member) {
+  if (text.IsNull()) return false;
+  Zone* zone = thread->zone();
+  const char* s = text.ToCString();
+  const intptr_t n = static_cast<intptr_t>(strlen(s));
+  if (n < 5 || strncmp(s, "lib:", 4) != 0) return false;
+  const char* lib_sep = strstr(s + 4, "::");
+  if (lib_sep == nullptr) return false;
+  const char* lib_beg = s + 4;
+  const intptr_t lib_len = lib_sep - lib_beg;
+  const char* tail = lib_sep + 2;
+  const char* owner_beg = nullptr;
+  intptr_t owner_len = 0;
+  if (strncmp(tail, "cls:", 4) == 0) {
+    const char* owner_sep = strstr(tail + 4, "::");
+    if (owner_sep == nullptr) return false;
+    owner_beg = tail + 4;
+    owner_len = owner_sep - owner_beg;
+    tail = owner_sep + 2;
+  }
+  const char* colon = strchr(tail, ':');
+  if (colon == nullptr) return false;
+  const intptr_t kind_len = colon - tail;
+  const char* member_beg = colon + 1;
+  const intptr_t member_len = (s + n) - member_beg;
+
+  // intern=true is the storage path and may create symbols. intern=false is
+  // the LOOKUP path and must not: an id nobody registered would otherwise add
+  // a permanent symbol on every failed lookup, and an absent symbol already
+  // proves no stored tuple can match.
+  auto resolve = [&](const char* beg, intptr_t len, String* out) -> bool {
+    if (intern) {
+      *out = Symbols::New(thread, beg, len);
+      return !out->IsNull();
+    }
+    const auto& probe = String::Handle(
+        zone, String::FromUTF8(reinterpret_cast<const uint8_t*>(beg), len,
+                               Heap::kNew));
+    *out = Symbols::Lookup(thread, probe);
+    return !out->IsNull();
+  };
+  if (!resolve(lib_beg, lib_len, library)) return false;
+  if (owner_beg == nullptr) {
+    *owner = Symbols::Empty().ptr();
+  } else if (!resolve(owner_beg, owner_len, owner)) {
+    return false;
+  }
+  if (!resolve(tail, kind_len, kind)) return false;
+  if (!resolve(member_beg, member_len, member)) return false;
+  return true;
+}
+
+StringPtr MaotRegistry::ComposeDeclarationId(Thread* thread,
+                                             const Array& parts) {
+  if (parts.IsNull() || parts.Length() != kIdComponentCount) {
+    return String::null();
+  }
+  Zone* zone = thread->zone();
+  const auto& library =
+      String::Handle(zone, String::RawCast(parts.At(kIdLibrary)));
+  const auto& owner =
+      String::Handle(zone, String::RawCast(parts.At(kIdOwner)));
+  const auto& kind = String::Handle(zone, String::RawCast(parts.At(kIdKind)));
+  const auto& member =
+      String::Handle(zone, String::RawCast(parts.At(kIdMember)));
+  if (library.IsNull() || owner.IsNull() || kind.IsNull() || member.IsNull()) {
+    return String::null();
+  }
+  ZoneTextBuffer buffer(zone);
+  buffer.Printf("lib:%s::", library.ToCString());
+  if (owner.Length() > 0) {
+    buffer.Printf("cls:%s::", owner.ToCString());
+  }
+  buffer.Printf("%s:%s", kind.ToCString(), member.ToCString());
+  return String::New(buffer.buffer(), Heap::kOld);
+}
+
+ArrayPtr MaotRegistry::EncodeDeclarationId(Thread* thread,
+                                           const String& text) {
+  if (text.IsNull()) return Array::null();
+  Zone* zone = thread->zone();
+  auto& library = String::Handle(zone);
+  auto& owner = String::Handle(zone);
+  auto& kind = String::Handle(zone);
+  auto& member = String::Handle(zone);
+  if (!SplitDeclarationId(thread, text, /*intern=*/true, &library, &owner,
+                          &kind, &member)) {
+    g_maot_ids_verbatim++;
+    return Array::null();
+  }
+  const auto& parts =
+      Array::Handle(zone, Array::New(kIdComponentCount, Heap::kOld));
+  parts.SetAt(kIdLibrary, library);
+  parts.SetAt(kIdOwner, owner);
+  parts.SetAt(kIdKind, kind);
+  parts.SetAt(kIdMember, member);
+  // ROUND-TRIP OR NOTHING. Byte-for-byte reconstruction is a property of the
+  // stored value, checked here, not a property a test hopes for afterwards.
+  const auto& back = String::Handle(zone, ComposeDeclarationId(thread, parts));
+  if (back.IsNull() || !back.Equals(text)) {
+    g_maot_ids_verbatim++;
+    return Array::null();
+  }
+  g_maot_ids_structured++;
+  return parts.ptr();
+}
+
 intptr_t MaotRegistry::IndexOf(Thread* thread, const String& declaration_id) {
   Zone* zone = thread->zone();
   const auto& storage = GrowableObjectArray::Handle(zone, EnsureStorage(thread));
-  auto& candidate = String::Handle(zone);
   const intptr_t entries = storage.Length() / kEntrySize;
+  auto& q_library = String::Handle(zone);
+  auto& q_owner = String::Handle(zone);
+  auto& q_kind = String::Handle(zone);
+  auto& q_member = String::Handle(zone);
+  const bool structured =
+      SplitDeclarationId(thread, declaration_id, /*intern=*/false, &q_library,
+                         &q_owner, &q_kind, &q_member);
+  auto& slot = Object::Handle(zone);
+  auto& parts = Array::Handle(zone);
+  auto& candidate = String::Handle(zone);
   for (intptr_t i = 0; i < entries; i++) {
-    candidate ^= storage.At(i * kEntrySize + kDeclarationId);
-    if (candidate.Equals(declaration_id)) {
+    slot = storage.At(i * kEntrySize + kDeclarationId);
+    if (slot.IsArray()) {
+      // Components are Symbols on both sides, so identity IS equality and the
+      // comparison is four pointer tests rather than a 108-byte memcmp.
+      if (!structured) continue;
+      parts ^= slot.ptr();
+      if (parts.Length() == kIdComponentCount &&
+          parts.At(kIdLibrary) == q_library.ptr() &&
+          parts.At(kIdOwner) == q_owner.ptr() &&
+          parts.At(kIdKind) == q_kind.ptr() &&
+          parts.At(kIdMember) == q_member.ptr()) {
+        return i;
+      }
+      continue;
+    }
+    candidate ^= slot.ptr();
+    if (!candidate.IsNull() && candidate.Equals(declaration_id)) {
       return i;
     }
   }
@@ -410,7 +570,16 @@ bool MaotRegistry::Register(Thread* thread,
                  implementation.ToCString());
   }
   const auto& storage = GrowableObjectArray::Handle(zone, EnsureStorage(thread));
-  storage.Add(declaration_id, Heap::kOld);
+  {
+    // Store the tuple when it round-trips, the text when it does not.
+    const auto& parts =
+        Array::Handle(zone, EncodeDeclarationId(thread, declaration_id));
+    if (parts.IsNull()) {
+      storage.Add(declaration_id, Heap::kOld);
+    } else {
+      storage.Add(parts, Heap::kOld);
+    }
+  }
   storage.Add(Smi::Handle(zone, Smi::New(selected ? 1 : 0)), Heap::kOld);
   storage.Add(Smi::Handle(zone, Smi::New(kAot)), Heap::kOld);
   storage.Add(Smi::Handle(zone, Smi::New(1)), Heap::kOld);
@@ -812,7 +981,7 @@ StringPtr MaotRegistry::AnyDeclarationIdOf(Thread* thread,
   for (intptr_t i = 0; i < entries; i++) {
     candidate ^= FieldAt(thread, i, kCurrentImpl);
     if (candidate.ptr() == function.ptr()) {
-      return String::RawCast(FieldAt(thread, i, kDeclarationId));
+      return DeclarationIdAt(thread, i);
     }
   }
   return String::null();
@@ -839,7 +1008,7 @@ StringPtr MaotRegistry::DeclarationIdOf(Thread* thread,
                                         const Function& function) {
   const intptr_t entry = EntryForDeclarationFunction(thread, function);
   if (entry < 0) return String::null();
-  return String::RawCast(FieldAt(thread, entry, kDeclarationId));
+  return DeclarationIdAt(thread, entry);
 }
 
 StringPtr MaotRegistry::DeclarationIdSuppliedBy(Thread* thread,
@@ -852,7 +1021,7 @@ StringPtr MaotRegistry::DeclarationIdSuppliedBy(Thread* thread,
     if (Smi::Value(Smi::RawCast(FieldAt(thread, i, kSelected))) != 1) continue;
     candidate ^= FieldAt(thread, i, kCurrentImpl);
     if (candidate.ptr() == impl.ptr()) {
-      return String::RawCast(FieldAt(thread, i, kDeclarationId));
+      return DeclarationIdAt(thread, i);
     }
   }
   return String::null();
@@ -894,7 +1063,7 @@ void MaotRegistry::NoteEscape(Thread* thread,
     if (Smi::Value(Smi::RawCast(FieldAt(thread, i, kSelected))) != 1) continue;
     candidate ^= FieldAt(thread, i, kCurrentImpl);
     if (candidate.ptr() != function.ptr()) continue;
-    id ^= FieldAt(thread, i, kDeclarationId);
+    id = DeclarationIdAt(thread, i);
     NoteEscapeById(thread, id, reason);
     return;
   }
@@ -1000,8 +1169,7 @@ void MaotRegistry::NoteInlineVerdict(Thread* thread,
       // build ship a descriptor that claims to be installable.
       NoteEscapeById(
           thread,
-          String::Handle(zone,
-                         String::RawCast(FieldAt(thread, i, kDeclarationId))),
+          String::Handle(zone, DeclarationIdAt(thread, i)),
           "the inliner took this declaration as a callee, so a caller holds a "
           "copy that no dispatch cell mediates");
     }
@@ -1048,8 +1216,13 @@ CodePtr MaotRegistry::CellImplCodeAt(Thread* thread, intptr_t entry) {
 }
 
 StringPtr MaotRegistry::DeclarationIdAt(Thread* thread, intptr_t entry) {
-  const ObjectPtr raw = FieldAt(thread, entry, kDeclarationId);
-  return raw == Object::null() ? String::null() : String::RawCast(raw);
+  Zone* zone = thread->zone();
+  const auto& raw = Object::Handle(zone, FieldAt(thread, entry, kDeclarationId));
+  if (raw.IsNull()) return String::null();
+  if (raw.IsArray()) {
+    return ComposeDeclarationId(thread, Array::Cast(raw));
+  }
+  return String::RawCast(raw.ptr());
 }
 
 bool MaotRegistry::IsTrampolineCode(Thread* thread, ObjectPtr code) {
@@ -1313,7 +1486,7 @@ intptr_t MaotRegistry::CountDivergedImplementations(Thread* thread,
                       fn.CurrentCode() == Code::RawCast(pinned.ptr());
     if (!same) {
       if (diverged == 0 && diverged_id != nullptr) {
-        id ^= FieldAt(thread, i, kDeclarationId);
+        id = DeclarationIdAt(thread, i);
         *diverged_id = id.ptr();
       }
       diverged++;
@@ -1596,9 +1769,8 @@ void MaotRegistry::WriteResolutionProbes(Thread* thread, const char* path) {
       name_p = fn_p.name();
 
       const intptr_t by_id = IndexOf(thread, id_p);
-      landed = (by_id < 0)
-                   ? String::null()
-                   : String::RawCast(FieldAt(thread, by_id, kDeclarationId));
+      landed = (by_id < 0) ? String::null()
+                           : DeclarationIdAt(thread, by_id);
       w.OpenObject();
       w.PrintProperty("declaration_id", id_p.ToCString());
       w.PrintProperty("function_name", name_p.ToCString());
@@ -1609,9 +1781,8 @@ void MaotRegistry::WriteResolutionProbes(Thread* thread, const char* path) {
 
       const intptr_t by_name =
           LookupByFunctionNameForFalsification(thread, name_p);
-      landed = (by_name < 0)
-                   ? String::null()
-                   : String::RawCast(FieldAt(thread, by_name, kDeclarationId));
+      landed = (by_name < 0) ? String::null()
+                             : DeclarationIdAt(thread, by_name);
       w.OpenObject();
       w.PrintProperty("declaration_id", id_p.ToCString());
       w.PrintProperty("function_name", name_p.ToCString());
@@ -2108,7 +2279,7 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
   auto& abi = String::Handle(zone);
   auto& impl = Function::Handle(zone);
   for (intptr_t i = 0; i < entries; i++) {
-    id ^= FieldAt(thread, i, kDeclarationId);
+    id = DeclarationIdAt(thread, i);
     abi ^= FieldAt(thread, i, kCurrentAbi);
     impl ^= FieldAt(thread, i, kCurrentImpl);
     writer.OpenObject();
@@ -2175,8 +2346,7 @@ void MaotRegistry::DumpToFile(Thread* thread, const char* path) {
       // Which records are doing the blocking, by name. A bare escape count
       // cannot say whether a form that was proven is still being counted.
       {
-        const auto& decl = String::Handle(zone,
-            String::RawCast(FieldAt(thread, i, kDeclarationId)));
+        const auto& decl = String::Handle(zone, DeclarationIdAt(thread, i));
         char buf[1024];
         BufferFormatter bf(buf, sizeof(buf));
         BlockingRecordsFor(thread, decl, &bf);
@@ -2746,7 +2916,7 @@ void MaotRegistry::ClassifyCodePointer(Thread* thread,
       {kTrampolineCode, "kTrampolineCode"},
   };
   for (intptr_t i = 0; i < entries; i++) {
-    id = String::RawCast(FieldAt(thread, i, kDeclarationId));
+    id = DeclarationIdAt(thread, i);
     for (const auto& cf : kCodeFields) {
       field = FieldAt(thread, i, cf.f);
       if (field.ptr() == candidate) {

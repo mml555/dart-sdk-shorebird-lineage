@@ -2718,6 +2718,52 @@ void Precompiler::MaterializeMutableAotRegistry() {
   }
   MaotRegistry::SetMaterializationStats(selected_seen, keep_ids.length(),
                                         dropped);
+
+  // IDENTITY EQUIVALENCE, measured on the artifact rather than argued.
+  // Every id is rendered back out of the stored tuple and compared with the
+  // text it was registered from, and both the texts and the tuples are
+  // counted for distinctness -- a tuple encoding that collapsed two ids would
+  // show up as fewer distinct tuples than texts.
+  {
+    intptr_t roundtrip_ok = 0, roundtrip_fail = 0;
+    auto& rendered = String::Handle(Z);
+    auto& other = String::Handle(Z);
+    intptr_t dup_texts = 0, dup_tuples = 0;
+    GrowableArray<const String*> rendered_all;
+    for (intptr_t i = 0; i < keep_ids.length(); i++) {
+      rendered = MaotRegistry::DeclarationIdAt(T, i);
+      if (!rendered.IsNull() && rendered.Equals(*keep_ids[i])) {
+        roundtrip_ok++;
+      } else {
+        roundtrip_fail++;
+        if (roundtrip_fail <= 3) {
+          OS::PrintErr("[maot] ID ROUND-TRIP FAILED: %s -> %s\n",
+                       keep_ids[i]->ToCString(),
+                       rendered.IsNull() ? "<null>" : rendered.ToCString());
+        }
+      }
+      rendered_all.Add(&String::ZoneHandle(Z, rendered.ptr()));
+    }
+    for (intptr_t i = 0; i < keep_ids.length(); i++) {
+      for (intptr_t j = i + 1; j < keep_ids.length(); j++) {
+        if (keep_ids[i]->Equals(*keep_ids[j])) dup_texts++;
+        other = rendered_all[j]->ptr();
+        if (!rendered_all[i]->IsNull() && !other.IsNull() &&
+            rendered_all[i]->Equals(other)) {
+          dup_tuples++;
+        }
+      }
+    }
+    OS::PrintErr("[maot] DECLARATION_IDS entries=%" Pd " structured=%" Pd
+                 " verbatim=%" Pd " roundtrip_ok=%" Pd " roundtrip_fail=%" Pd
+                 " duplicate_texts=%" Pd " duplicate_tuples=%" Pd "%s\n",
+                 keep_ids.length(),
+                 MaotRegistry::declaration_ids_structured(),
+                 MaotRegistry::declaration_ids_verbatim(), roundtrip_ok,
+                 roundtrip_fail, dup_texts, dup_tuples,
+                 (roundtrip_fail != 0 || dup_texts != dup_tuples)
+                     ? "  <-- IDENTITY NOT PRESERVED" : "");
+  }
   if (FLAG_maot_trace_registration) {
     OS::PrintErr("[maot] materialized %" Pd " of %" Pd " selected (%" Pd
                  " dropped)\n", keep_ids.length(), selected_seen, dropped);

@@ -339,6 +339,11 @@ class MaotRegistry : public AllStatic {
   static ArrayPtr DispatchCellAt(Thread* thread, intptr_t entry);
   static CodePtr CellImplCodeAt(Thread* thread, intptr_t entry);
   static StringPtr DeclarationIdAt(Thread* thread, intptr_t entry);
+  // Evidence counters: how many ids are stored as tuples and how many fell
+  // back to text. A prototype whose fallback count is unknown has not been
+  // shown to preserve anything.
+  static intptr_t declaration_ids_structured();
+  static intptr_t declaration_ids_verbatim();
   // Records what DoUnlinkedCallAOT actually installed: the flag as read and
   // the class id of the resulting state object.
   static void NoteUnlinkedTransition(bool can_patch_to_monomorphic,
@@ -653,6 +658,38 @@ class MaotRegistry : public AllStatic {
   // reach a declaration body any other way once the trampoline is its
   // CurrentCode. Two copies of this set would drift silently.
   static const EntryField kPinnedCodeFields[3];
+
+  // A DECLARATION ID IS A 4-TUPLE; the text is its canonical rendering.
+  //
+  // 1,853 declarations carried 1,853 full-text ids, 201,004 characters, of
+  // which 51.2% was a library URI drawn from 71 distinct values and another
+  // 8.0% was a URI embedded a second time inside a private member name. The
+  // tuple is what the snapshot stores; the text is reconstructed byte for byte
+  // wherever the outside world expects it, so the identity contract, the
+  // kernel metadata, the install API and every diagnostic are unchanged.
+  //
+  // Components are Symbols, so a tuple comparison is four pointer comparisons
+  // and the 71 URIs are stored once between them.
+  enum IdComponent {
+    kIdLibrary = 0,
+    kIdOwner,    // Symbols::Empty() for a top-level declaration
+    kIdKind,
+    kIdMember,
+    kIdComponentCount
+  };
+  // Returns an Array(kIdComponentCount) of interned components, or null when
+  // the text does not render back to itself exactly -- in which case the
+  // caller stores the text verbatim and nothing is lost.
+  static ArrayPtr EncodeDeclarationId(Thread* thread, const String& text);
+  static StringPtr ComposeDeclarationId(Thread* thread, const Array& parts);
+  static bool SplitDeclarationId(Thread* thread,
+                                 const String& text,
+                                 bool intern,
+                                 String* library,
+                                 String* owner,
+                                 String* kind,
+                                 String* member);
+
 
   static GrowableObjectArrayPtr EnsureStorage(Thread* thread);
   static ObjectPtr FieldAt(Thread* thread, intptr_t entry, EntryField field);
