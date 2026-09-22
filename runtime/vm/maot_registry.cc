@@ -545,7 +545,13 @@ StringPtr MaotRegistry::ComputeCallConvention(Thread* thread,
   } else {
     buffer.AddString("t");
   }
-  return String::New(buffer.buffer(), Heap::kOld);
+  // Symbols::New, not String::New. There are 1,853 declarations and 51
+  // distinct calling-convention shapes among them, so a fresh String per
+  // declaration wrote the same few sentences into the snapshot 1,853 times --
+  // 118,608 bytes measured, of which 115,328 were copies. Interning changes
+  // no comparison: every consumer uses String::Equals, and equal contents stay
+  // equal whether or not they are the same object.
+  return Symbols::New(thread, buffer.buffer());
 #endif
 }
 
@@ -907,8 +913,12 @@ void MaotRegistry::NoteEscapeById(Thread* thread,
     // First reason only: the count says how many, the reason says what kind.
     // Appending every one would make the field grow without telling any
     // decision anything it does not already know.
+    // Interned for the same reason as the calling convention: 78 entries
+    // carried 78 copies of one 144-byte sentence. The installation gate reads
+    // kEscapeCount, a Smi; this field is the explanation beside it, and one
+    // copy explains as much as 78.
     SetFieldAt(thread, entry, kEscapeReason,
-               String::Handle(zone, String::New(reason, Heap::kOld)));
+               String::Handle(zone, Symbols::New(thread, reason)));
   }
   if (FLAG_maot_trace_registration) {
     OS::PrintErr("[maot] ESCAPE %s: %s\n", declaration_id.ToCString(), reason);
