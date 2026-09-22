@@ -344,6 +344,13 @@ class MaotRegistry : public AllStatic {
   // shown to preserve anything.
   static intptr_t declaration_ids_structured();
   static intptr_t declaration_ids_verbatim();
+  // Components are interned, and interning is permanent, so it must happen
+  // only for the declarations that survive into the image. Registration runs
+  // for every CANDIDATE -- 22,675 of them against 1,853 survivors -- so
+  // encoding there interns four components for twenty thousand declarations
+  // that materialization then drops, and the symbol table keeps every one.
+  // The materializer turns this on around its rebuild and off afterwards.
+  static void SetEncodeDeclarationIds(bool on);
   // Records what DoUnlinkedCallAOT actually installed: the flag as read and
   // the class id of the resulting state object.
   static void NoteUnlinkedTransition(bool can_patch_to_monomorphic,

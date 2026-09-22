@@ -384,6 +384,11 @@ void MaotRegistry::Clear(Thread* thread) {
 
 static intptr_t g_maot_ids_structured = 0;
 static intptr_t g_maot_ids_verbatim = 0;
+static bool g_maot_encode_ids = false;
+
+void MaotRegistry::SetEncodeDeclarationIds(bool on) {
+  g_maot_encode_ids = on;
+}
 
 intptr_t MaotRegistry::declaration_ids_structured() {
   return g_maot_ids_structured;
@@ -486,6 +491,7 @@ StringPtr MaotRegistry::ComposeDeclarationId(Thread* thread,
 
 ArrayPtr MaotRegistry::EncodeDeclarationId(Thread* thread,
                                            const String& text) {
+  if (!g_maot_encode_ids) return Array::null();
   if (text.IsNull()) return Array::null();
   Zone* zone = thread->zone();
   auto& library = String::Handle(zone);
