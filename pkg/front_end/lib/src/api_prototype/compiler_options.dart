@@ -111,7 +111,7 @@ class CompilerOptions {
   /// Setting this makes that mechanism available outside the debugger: every
   /// source compilation unit also resolves names in the named library's own
   /// namespace. The named library must be available to the compile, which in
-  /// practice means it arrives via [additionalDills].
+  /// practice means it arrives via [additionalDillModules].
   ///
   /// This exists for generated code that must behave as if it belonged to a
   /// library it is not textually in -- a hot-patch replacement body compiled
