@@ -376,8 +376,8 @@ class MaotDeclarationIdMetadataRepository
       totalPositional = function.positionalParameters.length;
       typeParameterCount = function.typeParameters.length;
       for (final p in function.namedParameters) {
-        named.add(p.name ?? '');
-        if (p.isRequired) requiredNamed.add(p.name ?? '');
+        named.add(p.parameterName);
+        if (p.isRequired) requiredNamed.add(p.parameterName);
       }
       named.sort();
       requiredNamed.sort();
