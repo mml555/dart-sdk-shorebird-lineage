@@ -1363,7 +1363,7 @@ DART_EXPORT char* Dart_RouteBReleaseBuildId() {
   Thread* thread = Thread::Current();
   if (thread == nullptr || thread->isolate() == nullptr) return nullptr;
   auto* const instructions = reinterpret_cast<const uint8_t*>(
-      thread->isolate_group()->source()->snapshot_instructions);
+      thread->isolate_group()->source()->snapshot_text);
   if (instructions == nullptr) return nullptr;
   const auto& build_id = OS::GetAppBuildId(instructions);
   if (build_id.data == nullptr || build_id.len <= 0) return nullptr;
@@ -1389,7 +1389,7 @@ DEFINE_NATIVE_ENTRY(Internal_releaseBuildId, 0, 0) {
   // interpreted body, not as a clean error. The toolchain already emits a GNU
   // build ID into the snapshot, so the check costs nothing to carry.
   auto* const instructions = reinterpret_cast<const uint8_t*>(
-      thread->isolate_group()->source()->snapshot_instructions);
+      thread->isolate_group()->source()->snapshot_text);
   if (instructions == nullptr) {
     return Object::null();
   }
