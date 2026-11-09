@@ -94,6 +94,24 @@ T unsafeCast<T>(dynamic v) => v;
 Future<Object?> loadDynamicModule({Uri? uri, Uint8List? bytes}) =>
     throw 'Unsupported operation';
 
+// SELFHOST: Route B's bytecode hooks in dart:_internal are VM-only. The web
+// compilers refuse an `external` with no patch, so each gets one here that
+// says so rather than leaving the platform library unbuildable.
+@patch
+bool attachBytecodeToFunction(
+  Uint8List bytecode,
+  String libraryUri,
+  String targetName,
+) => throw UnsupportedError('attachBytecodeToFunction');
+
+@patch
+bool detachBytecodeFromFunction(String libraryUri, String targetName) =>
+    throw UnsupportedError('detachBytecodeFromFunction');
+
+/// There is no AOT snapshot on the web, so there is no build ID to report.
+@patch
+String? releaseBuildId() => null;
+
 final List<Object> _toStringVisiting = [];
 @patch
 List<Object> get toStringVisiting => _toStringVisiting;
