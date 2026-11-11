@@ -1,8 +1,8 @@
 # SELFHOST 3.13.7 port record
 
 Source-level port of the Shorebird-lineage Dart SDK fork from Dart 3.12.2 to
-Dart 3.13.7. When written, nothing here was built or run; "Verified since"
-lists what has been run on a build host since then. Read "Unverified" before
+Dart 3.13.7. When written, nothing here was built or run. "Verified since"
+lists what has run on a build host since then; read "Unverified" before
 relying on anything else. No existing branch was moved, rewritten or deleted; the old
 branches (`provenance/route-b-selfhost-v1.1.1`, `maot/*`) remain the
 certification records for 3.12.2.
@@ -144,7 +144,8 @@ upstream 4feee97fe8e removed `Variable.name`, the non-null name is
    not load. The `Dart_RouteBActivatePatch` / `Internal_attachBytecodeToFunction`
    paths run the new interpreter and `InterpretCall` stub; the kill-gate
    behaviour of `patchable_static_calls` (call through `Function::entry_point_`,
-   R0/R4 register contract in `flow_graph_compiler_arm64.cc`) must be re-proved.
+   R0/R4 register contract in `flow_graph_compiler_arm64.cc`) must be re-proved
+   (host kill gate re-proved 2026-11-10: see "Verified since").
 4. `SNAPSHOT_HASH`: `object.cc/.h`, `object_store.h` are snapshot-hash inputs
    and upstream changed them heavily (app_snapshot.cc +/-1.4k lines). The hash
    differs from 3.12.2 cells and from vanilla 3.13.7; a snapshot produced by
@@ -205,10 +206,11 @@ NOT verified (needs the build host):
 * The maot_registry surviving into the AOT snapshot (the reason for the
   object_store.h placement rule) and the dispatch-cell / slot-preserving
   behaviour.
-* Route B: detach/rollback, the engine-side lifecycle, and everything on a
-  device. The host kill gate (attach, `patchable_static_calls`, the
-  interpreter path, bytecode v3 producer + loader) now passes: see
-  "Verified since".
+* Route B: detach/rollback, the target->pool slot rewrite (the gate rewrote
+  0 slots, so that path did not run), the engine-side lifecycle, real-app
+  patches, and everything on a device. The host kill gate (attach,
+  `patchable_static_calls`, the interpreter path, bytecode v3 producer +
+  loader) now passes for one small patch: see "Verified since".
 * The gates in selfhost: M1/M2 (`run_m1.sh`, `run_m2.sh`), G15 evidence,
   and all certification claims. None of the 3.12.2 evidence applies to this tree.
 * Engine side: the Shorebird engine at 3.47.7 against the single-snapshot API.
@@ -218,8 +220,10 @@ NOT verified (needs the build host):
 ## Verified since: Route B host kill gate (2026-11-10)
 
 Host: macOS arm64 (Apple silicon). `patchable_static_calls` is implemented
-only in `flow_graph_compiler_arm64.cc`, so an x64 host such as ci-build cannot
-run this gate. Tree: Flutter `7806e0fb682`, this lineage at `d2df9606d11`
+only in `flow_graph_compiler_arm64.cc`, so an x64 host cannot run this gate
+(ci-build is x86_64: `uname -m`, and its `host_release/args.gn` has
+`host_cpu = "x64"`). Tree: Flutter `7806e0fb68242dbef74e224bdaa81bd62b0d988e`,
+this lineage at `d2df9606d11f9260bcf5a2118245c322cc2baf8b`
 (`selfhost/3.13.7/route-b` tip). Build: `./flutter/tools/gn
 --runtime-mode=release --mac-cpu arm64 --no-prebuilt-dart-sdk
 --dart-dynamic-modules --target-dir host_release_arm64_ddm`, then `ninja
@@ -255,8 +259,13 @@ Circle.describe         dynamic-instance      PATCHABLE
 ```
 
 The one `not reachable` row is the statically-typed polymorphic call through
-the dispatch table, which `selfhost/ROUTE_B.md` already lists as not patchable
-on 3.12.2. Same result as before the port, so it is not a regression.
+the dispatch table, which `selfhost/ROUTE_B.md` already classifies as not
+patchable on 3.12.2. So it is an expected limit, not a new regression.
+
+Scope: these are two small fixtures (one replacement that calls `print`, and
+six one-line targets) on a host release build. They prove the mechanism, not
+real-app patches; the compatibility study has to be re-run on the new
+compiler cell for that.
 
 So item 3 of the section above holds on the host: the 3.13.7 interpreter, the
 `InterpretCall` stub and the arm64 register contract work with
@@ -286,7 +295,7 @@ selfhost/engine/dart-fork/README.md. One heavy job at a time on a shared host.
    `selfhost/3.13.7/code-push-api`; Route B engine: `.../route-b`; Mutable-AOT:
    `maot/3.13.7/build`.
 3. Engine build (selfhost/engine/build.sh): `./flutter/tools/gn --no-rbe
-   --no-enable-unittests ...` for the cell, then
+   --no-enable-unittests ...` for a non-Route-B cell, then
    `ninja -C out/<dir> -j3 default gen_snapshot`. For Route B / dynamic modules
    the GN args must set `dart_dynamic_modules=true` (the code under
    `DART_DYNAMIC_MODULES` is compiled out otherwise).
