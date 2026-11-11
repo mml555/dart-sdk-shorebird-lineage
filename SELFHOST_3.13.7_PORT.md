@@ -1,8 +1,9 @@
 # SELFHOST 3.13.7 port record
 
 Source-level port of the Shorebird-lineage Dart SDK fork from Dart 3.12.2 to
-Dart 3.13.7. Nothing here was built or run: see "Unverified" before relying on
-any of it. No existing branch was moved, rewritten or deleted; the old
+Dart 3.13.7. When written, nothing here was built or run; "Verified since"
+lists what has been run on a build host since then. Read "Unverified" before
+relying on anything else. No existing branch was moved, rewritten or deleted; the old
 branches (`provenance/route-b-selfhost-v1.1.1`, `maot/*`) remain the
 certification records for 3.12.2.
 
@@ -204,13 +205,63 @@ NOT verified (needs the build host):
 * The maot_registry surviving into the AOT snapshot (the reason for the
   object_store.h placement rule) and the dispatch-cell / slot-preserving
   behaviour.
-* Route B: attach/detach/rollback, `patchable_static_calls`, target->pool
-  scan, the interpreter paths, bytecode v3 payload producer + loader.
+* Route B: detach/rollback, the engine-side lifecycle, and everything on a
+  device. The host kill gate (attach, `patchable_static_calls`, the
+  interpreter path, bytecode v3 producer + loader) now passes: see
+  "Verified since".
 * The gates in selfhost: M1/M2 (`run_m1.sh`, `run_m2.sh`), G15 evidence,
   and all certification claims. None of the 3.12.2 evidence applies to this tree.
 * Engine side: the Shorebird engine at 3.47.7 against the single-snapshot API.
 * Upstream's own test suites (this port touched dart2bytecode / vm / CFE code
   with testcases that expect old output).
+
+## Verified since: Route B host kill gate (2026-11-10)
+
+Host: macOS arm64 (Apple silicon). `patchable_static_calls` is implemented
+only in `flow_graph_compiler_arm64.cc`, so an x64 host such as ci-build cannot
+run this gate. Tree: Flutter `7806e0fb682`, this lineage at `d2df9606d11`
+(`selfhost/3.13.7/route-b` tip). Build: `./flutter/tools/gn
+--runtime-mode=release --mac-cpu arm64 --no-prebuilt-dart-sdk
+--dart-dynamic-modules --target-dir host_release_arm64_ddm`, then `ninja
+gen_snapshot dartaotruntime dart dart_sdk vm_platform.dill`. It compiled with no
+source change (4818/4818 steps; `args.gn` has `dart_dynamic_modules = true`;
+`dartaotruntime` has 4 `AttachBytecode` symbols). Scripts are from
+mml555/shorebird `main`, `selfhost/engine/route_b/`.
+
+`verify_binding.sh`: **PASS**. The patch bound to `dart:core` `print` through
+a generated dynamic interface, and all four call shapes reached the new body:
+
+```
+ATTACH: before -> IsInterpreted=0 HasBytecode=0
+ATTACH: after  -> IsInterpreted=1 HasBytecode=1
+ATTACH: pool len=2350, rewrote 0 slot(s) (other Code slots=113)
+ATTACH: C++ invoke of target returned: NEW-PRINTED
+after  direct   : NEW-PRINTED
+after  tear-off : NEW-PRINTED
+after  dynamic  : NEW-PRINTED
+after  apply    : NEW-PRINTED
+GATE: PASS -- interpreted body replaced AOT body, direct calls included
+```
+
+`inventory/run_inventory.sh` (`--patchable_static_calls`):
+
+```
+topLevelStatic          topLevelStatic        PATCHABLE
+Holder.staticMethod     staticMethod          PATCHABLE
+Holder.monomorphic      monomorphic           PATCHABLE
+Holder.get:getter       getter                PATCHABLE
+Circle.describe         polymorphic-first     not reachable
+Circle.describe         dynamic-instance      PATCHABLE
+```
+
+The one `not reachable` row is the statically-typed polymorphic call through
+the dispatch table, which `selfhost/ROUTE_B.md` already lists as not patchable
+on 3.12.2. Same result as before the port, so it is not a regression.
+
+So item 3 of the section above holds on the host: the 3.13.7 interpreter, the
+`InterpretCall` stub and the arm64 register contract work with
+`patchable_static_calls`. Still open: engine-side activation and lifecycle,
+detach/rollback, the iOS build, and a device run.
 
 ## Build-host steps
 
@@ -239,6 +290,10 @@ selfhost/engine/dart-fork/README.md. One heavy job at a time on a shared host.
    `ninja -C out/<dir> -j3 default gen_snapshot`. For Route B / dynamic modules
    the GN args must set `dart_dynamic_modules=true` (the code under
    `DART_DYNAMIC_MODULES` is compiled out otherwise).
+   Do not combine `--dart-dynamic-modules` with `--no-enable-unittests`:
+   the engine's `tools/gn` sets `dart_dynamic_modules = false` whenever
+   `--no-enable-unittests` is passed, with no message. Check `args.gn`
+   after gn runs.
 4. Mutable-AOT host tools (m2/build_maot.sh): set `MAOT_FORK` to the
    third_party/dart checkout, `MAOT_SRC_ROOT` to engine/src, run it; it runs
    `ninja -C out/maot_host gen_snapshot dartaotruntime` (never pipe ninja to
