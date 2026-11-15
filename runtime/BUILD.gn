@@ -455,5 +455,12 @@ action("generate_version_cc_file") {
   }
   if (!verify_sdk_hash) {
     args += [ "--no-sdk-hash" ]
+  } else if (dart_sdk_verification_hash != "") {
+    # Kernels are stamped with the pinned hash (sdk_args.gni), so the VM must
+    # verify against it too, not against the checkout's HEAD.
+    args += [
+      "--sdk-hash",
+      dart_sdk_verification_hash,
+    ]
   }
 }
