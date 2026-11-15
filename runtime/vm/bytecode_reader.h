@@ -416,6 +416,14 @@ class BytecodeReaderHelper : public ValueObject {
   // class is from the current kernel binary.
   void LoadReferencedClass(const Class& cls);
 
+  // [selfhost] Reads the target of an interface call, which may be a
+  // stand-in; see InterfaceTargetStandIn.
+  ObjectPtr ReadInterfaceTarget();
+
+  // [selfhost] A function named [name], owned by [cls] but not added to it,
+  // standing in for an interface target that AOT tree-shook.
+  FunctionPtr InterfaceTargetStandIn(const Class& cls, const String& name);
+
   Reader reader_;
   Thread* const thread_;
   Zone* const zone_;
@@ -428,6 +436,9 @@ class BytecodeReaderHelper : public ValueObject {
   Function& scoped_function_;
   String& scoped_function_name_;
   Class& scoped_function_class_;
+  // [selfhost] Set while reading the target of an interface call. See
+  // BytecodeReaderHelper::InterfaceTargetStandIn.
+  bool reading_interface_target_ = false;
 
   DISALLOW_COPY_AND_ASSIGN(BytecodeReaderHelper);
 };
