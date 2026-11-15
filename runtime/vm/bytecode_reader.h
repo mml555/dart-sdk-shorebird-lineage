@@ -440,6 +440,10 @@ class BytecodeReaderHelper : public ValueObject {
   // BytecodeReaderHelper::InterfaceTargetStandIn.
   bool reading_interface_target_ = false;
 
+  // [selfhost] How many stand-ins this reader has made; ReadObject compares
+  // it across a read so it never caches one.
+  intptr_t stand_ins_made_ = 0;
+
   DISALLOW_COPY_AND_ASSIGN(BytecodeReaderHelper);
 };
 
