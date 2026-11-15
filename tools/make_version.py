@@ -50,7 +50,11 @@ def GetSemanticVersionFormat(no_git_hash):
     return version_format
 
 
-def FormatVersionString(version, no_git_hash, no_sdk_hash, version_file=None):
+def FormatVersionString(version,
+                        no_git_hash,
+                        no_sdk_hash,
+                        version_file=None,
+                        sdk_hash=None):
     semantic_sdk_version = utils.GetVersion(no_git_hash, version_file)
     semantic_version_format = GetSemanticVersionFormat(no_git_hash)
     version_str = (semantic_sdk_version
@@ -62,7 +66,13 @@ def FormatVersionString(version, no_git_hash, no_sdk_hash, version_file=None):
 
     git_hash = None
     # If we need SDK hash and git usage is not suppressed then try to get it.
-    if not no_sdk_hash and not no_git_hash:
+    if sdk_hash and not no_sdk_hash:
+        # A pinned dart_sdk_verification_hash. Kernels are stamped with it, so
+        # the VM must check against the same value rather than the checkout's
+        # HEAD, which differs whenever the VM carries changes the kernel
+        # format does not.
+        git_hash = sdk_hash
+    elif not no_sdk_hash and not no_git_hash:
         git_hash = utils.GetShortGitHash()
     if git_hash is None or len(git_hash) != 10:
         git_hash = '0000000000'
@@ -100,6 +110,11 @@ def main():
             action='store_true',
             default=False,
             help='Use null SDK hash to disable SDK verification in the VM')
+        parser.add_argument(
+            '--sdk-hash',
+            default=None,
+            help=('SDK hash to build into the VM instead of the git hash; '
+                  'the value of dart_sdk_verification_hash when it is set.'))
         parser.add_argument('--output', help='output file name')
         parser.add_argument('-q',
                             '--quiet',
@@ -127,7 +142,8 @@ def main():
             raise 'No version template given! Set either --input or --format.'
 
         version = FormatVersionString(version_template, args.no_git_hash,
-                                      args.no_sdk_hash, args.version_file)
+                                      args.no_sdk_hash, args.version_file,
+                                      args.sdk_hash)
 
         if args.output:
             # If the output already exists and there is no change, don't even
