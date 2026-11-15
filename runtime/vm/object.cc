@@ -27864,6 +27864,20 @@ intptr_t Function::MaxNumberOfParametersInRegisters(Zone* zone) const {
     return 0;
   }
 
+#if defined(DART_PRECOMPILER)
+  // SELFHOST (Route B): a selector --route_b_untabled_overrides keeps out of
+  // the dispatch table is called through switchable calls, which pass every
+  // argument on the stack (EmitInstanceCallAOT loads the receiver from there).
+  // TFA forces the stack convention only for functions it sees called
+  // dynamically, so without this an untabled method took its receiver in a
+  // register its callers never filled. The interface target shares the
+  // selector, so callers and implementations agree.
+  Precompiler* precompiler = Precompiler::Instance();
+  if (precompiler != nullptr && precompiler->IsRouteBUntabled(*this)) {
+    return 0;
+  }
+#endif
+
   // Getters and setters have fixed signatures.
   switch (kind()) {
     case UntaggedFunction::kGetterFunction:
