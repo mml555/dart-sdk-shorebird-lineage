@@ -20,6 +20,7 @@
 
 namespace dart {
 DECLARE_FLAG(bool, route_b_untabled_overrides);
+DECLARE_FLAG(bool, route_b_sdk_name_lookup);
 }  // namespace dart
 
 namespace dart {
@@ -275,6 +276,20 @@ class Precompiler : public ValueObject {
            dispatch_table_generator_ != nullptr &&
            function.IsDynamicFunction(/*allow_abstract=*/true) &&
            selector_map()->IsRouteBUntabled(function);
+  }
+
+  // SELFHOST (Route B): see the definition.
+  bool IsRouteBSdkNameLookup(const Function& function);
+
+  // SELFHOST (Route B): whether a target of this function's selector is
+  // looked up by name from patch bytecode, so the whole selector must use the
+  // stack calling convention; see SelectorMap::IsRouteBSdkNameLookup. Like
+  // IsRouteBUntabled, false once FinalizeDispatchTable has run.
+  bool IsRouteBSdkNameLookupSelector(const Function& function) {
+    return FLAG_route_b_untabled_overrides && FLAG_route_b_sdk_name_lookup &&
+           dispatch_table_generator_ != nullptr &&
+           function.IsDynamicFunction(/*allow_abstract=*/true) &&
+           selector_map()->IsRouteBSdkNameLookup(function);
   }
 
   static Precompiler* Instance() { return singleton_; }

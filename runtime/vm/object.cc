@@ -27913,8 +27913,16 @@ intptr_t Function::MaxNumberOfParametersInRegisters(Zone* zone) const {
   // dynamically, so without this an untabled method took its receiver in a
   // register its callers never filled. The interface target shares the
   // selector, so callers and implementations agree.
+  //
+  // The same holds for a selector with an SDK member patch bytecode looks up
+  // by name: the interpreter calls it through InvokeDartCodeFromBytecode,
+  // which passes every argument on the stack. Measured on a device: a patched
+  // for-in over a List called _GrowableList.get:iterator, which read its
+  // receiver from a register the stub never filled, and faulted at 0x8.
   Precompiler* precompiler = Precompiler::Instance();
-  if (precompiler != nullptr && precompiler->IsRouteBUntabled(*this)) {
+  if (precompiler != nullptr && (precompiler->IsRouteBUntabled(*this) ||
+                                 precompiler->IsRouteBSdkNameLookupSelector(
+                                     *this))) {
     return 0;
   }
 #endif

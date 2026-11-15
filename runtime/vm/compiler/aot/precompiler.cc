@@ -75,6 +75,12 @@ DEFINE_FLAG(charp,
             nullptr,
             "Print layout of Dart objects to the given file");
 DEFINE_FLAG(bool, trace_precompiler, false, "Trace precompiler.");
+// SELFHOST (Route B): see Precompiler::IsRouteBSdkNameLookup.
+DEFINE_FLAG(bool,
+            route_b_sdk_name_lookup,
+            true,
+            "Under --route_b_untabled_overrides, keep compiled SDK instance "
+            "members findable by name so patch bytecode can call them.");
 DEFINE_FLAG(charp,
             write_retained_reasons_to,
             nullptr,
@@ -1510,6 +1516,9 @@ const char* Precompiler::MustRetainFunction(const Function& function) {
   if (IsRouteBUntabled(function)) {
     return "route b untabled selector";
   }
+  if (IsRouteBSdkNameLookup(function)) {
+    return "route b sdk name lookup";
+  }
   if (Function::IsDynamicInvocationForwarderName(function.name())) {
     return "dynamic invocation forwarder";
   }
@@ -1519,6 +1528,56 @@ const char* Precompiler::MustRetainFunction(const Function& function) {
   }
 
   return nullptr;
+}
+
+// SELFHOST (Route B): patch bytecode calls SDK members by name.
+//
+// The interpreter dispatches an interface call by looking the selector up in
+// the receiver's class (Interpreter::InstanceCall ->
+// Resolver::ResolveDynamicForReceiverClass), but AOT empties class function
+// tables of everything compiled code reaches without a lookup -- direct and
+// dispatch-table calls. Measured on a device: `_GrowableList.join` had code in
+// the release and was absent from the class's table, so a patch calling
+// `parts.join()` threw NoSuchMethodError. Keeping the abstract interface
+// member as `dyn-module:callable` instead forces every implementation to be
+// compiled (+1.7 MB on a 5.7 MB snapshot for the core collection, string,
+// number and async classes).
+//
+// This keeps only what is already compiled: AddFunction calls it for functions
+// being compiled anyway, so it adds Function objects and signatures, never
+// code. Public instance members of dart: libraries only, the surface a patch
+// can reach without the release naming it. Excluded: anything taking or
+// returning an unboxed value, because the interpreter passes and expects boxed
+// values and the AOT runtime keeps no record it could check.
+bool Precompiler::IsRouteBSdkNameLookup(const Function& function) {
+  if (!FLAG_route_b_untabled_overrides || !FLAG_route_b_sdk_name_lookup) {
+    return false;
+  }
+  if (function.is_static()) return false;
+  switch (function.kind()) {
+    case UntaggedFunction::kRegularFunction:
+    case UntaggedFunction::kGetterFunction:
+    case UntaggedFunction::kSetterFunction:
+    case UntaggedFunction::kImplicitGetter:
+    case UntaggedFunction::kImplicitSetter:
+      break;
+    default:
+      return false;
+  }
+  if (function.HasUnboxedParameters() || function.HasUnboxedReturnValue()) {
+    return false;
+  }
+  const auto& owner = Class::Handle(Z, function.Owner());
+  if (owner.IsNull()) return false;
+  const auto& lib = Library::Handle(Z, owner.library());
+  if (lib.IsNull() || !lib.is_dart_scheme()) return false;
+  auto& name = String::Handle(Z, function.name());
+  if (Field::IsGetterName(name)) {
+    name = Field::NameFromGetter(name);
+  } else if (Field::IsSetterName(name)) {
+    name = Field::NameFromSetter(name);
+  }
+  return !Library::IsPrivate(name);
 }
 
 void Precompiler::AddFunction(const Function& function,
@@ -2378,6 +2437,13 @@ void Precompiler::DropFunctions() {
     }
     if (StackTraceUtils::IsNeededForAsyncAwareUnwinding(function)) {
       return AddRetainReason(sig, RetainReasons::kAsyncStackUnwinding);
+    }
+    if (IsRouteBSdkNameLookup(function)) {
+      // The interpreter resolves it by name and Resolver checks the call's
+      // arguments against this signature, so a call shaped differently from
+      // what TFA left (it drops parameters no caller passed) gets
+      // NoSuchMethodError instead of running with the wrong arguments.
+      return AddRetainReason(sig, "route b sdk name lookup signature");
     }
     if (FLAG_trace_precompiler) {
       THR_Print("Clearing signature for function %s\n",
@@ -3374,7 +3440,10 @@ void Precompiler::PruneDictionaries() {
           retained_functions_.Add(function_);
           retain = true;
         } else if (precompiler_->functions_called_dynamically_.ContainsKey(
-                       function_)) {
+                       function_) ||
+                   // SELFHOST (Route B): looked up by name from patch
+                   // bytecode; see Precompiler::IsRouteBSdkNameLookup.
+                   precompiler_->IsRouteBSdkNameLookup(function_)) {
           retained_functions_.Add(function_);
           // No `retain = true`: the function must appear in the method
           // dictionary for lookup, but the class may still be removed from the
