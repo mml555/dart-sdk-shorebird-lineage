@@ -1194,8 +1194,15 @@ void Precompiler::AddTypesOf(const Function& function) {
     FATAL("no retaining reasons given");
   }
 
+  // SELFHOST (Route B): an untabled selector's implementations are reached by
+  // switchable calls, which the runtime resolves by looking the name up in the
+  // class's function array. NeedsMonomorphicCheckedEntry covers most of them,
+  // but answers false first for one whose prologue needs an arguments
+  // descriptor (optional, named or type parameters), and such a function was
+  // then pruned from that array: the call ended in noSuchMethod.
   if (function.NeedsMonomorphicCheckedEntry(Z) ||
-      Function::IsDynamicInvocationForwarderName(function.name())) {
+      Function::IsDynamicInvocationForwarderName(function.name()) ||
+      IsRouteBUntabled(function)) {
     functions_called_dynamically_.Insert(function);
   }
 
@@ -1497,6 +1504,10 @@ const char* Precompiler::MustRetainFunction(const Function& function) {
   // function object in the class.
   if (function.NeedsMonomorphicCheckedEntry(Z)) {
     return "needs monomorphic checked entry";
+  }
+  // SELFHOST (Route B): see AddTypesOf.
+  if (IsRouteBUntabled(function)) {
+    return "route b untabled selector";
   }
   if (Function::IsDynamicInvocationForwarderName(function.name())) {
     return "dynamic invocation forwarder";

@@ -1199,7 +1199,10 @@ void AotCallSpecializer::TryReplaceWithDispatchTableCall(
 
   if (selector == nullptr) {
 #if defined(DEBUG)
-    if (!interface_target.IsDynamicallyOverridden()) {
+    // SELFHOST (Route B): an untabled selector has no row by design, so its
+    // call is live; see --route_b_untabled_overrides.
+    if (!interface_target.IsDynamicallyOverridden() &&
+        !precompiler_->IsRouteBUntabled(interface_target)) {
       // Target functions were removed by tree shaking. This call is dead code,
       // or the receiver is always null.
       AddCheckNull(receiver->CopyWithType(Z), call->function_name(),
