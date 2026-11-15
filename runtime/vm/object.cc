@@ -11759,6 +11759,21 @@ bool Function::NeedsMonomorphicCheckedEntry(Zone* zone) const {
     return true;
   }
 
+#if defined(DART_PRECOMPILER)
+  // SELFHOST (Route B): a selector --route_b_untabled_overrides keeps out of
+  // the dispatch table is called through switchable calls, which link
+  // monomorphic and enter through this check, exactly like the case above.
+  // Answering true also files the function under functions_called_dynamically_,
+  // which keeps it in its class's function array and keeps its Code: the
+  // runtime resolves a switchable call by looking the name up there. Without
+  // this, an app's build() methods have no table entry and no other referrer,
+  // and the precompiler drops them.
+  Precompiler* precompiler = Precompiler::Instance();
+  if (precompiler != nullptr && precompiler->IsRouteBUntabled(*this)) {
+    return true;
+  }
+#endif  // defined(DART_PRECOMPILER)
+
   // Only if there are dynamic callers and if we didn't create a dyn:* forwarder
   // for it do we need the monomorphic checked entry.
   return HasDynamicCallers(zone) && !NeedsDynamicInvocationForwarder();
@@ -11794,6 +11809,18 @@ bool Function::PrologueNeedsArgumentsDescriptor() const {
   if (is_declared_in_bytecode()) {
     return true;
   }
+#if defined(DART_PRECOMPILED_RUNTIME)
+  // SELFHOST (Route B): the same holds for an AOT function whose body
+  // AttachBytecode replaced. Its code is now the InterpretCall stub, which
+  // needs the Function and the descriptor, and a switchable call linked
+  // monomorphic would jump straight to it with neither. Answering true here
+  // keeps those sites on ICCallThroughCode, whose stub loads both (see
+  // PatchableCallHandler::DoUnlinkedCallAOT). Route B activates before main,
+  // so no site has been linked against the old code.
+  if (IsInterpreted()) {
+    return true;
+  }
+#endif
 #endif
   // These functions have a saved compile-time arguments descriptor that is
   // used in lieu of the runtime arguments descriptor in generated IL.
