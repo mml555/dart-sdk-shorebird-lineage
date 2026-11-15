@@ -697,13 +697,13 @@ class BytecodeGenerator extends RecursiveVisitor {
     // that class's super target and call it unchecked on this receiver.
     //
     // Established from the entry point's own receiver type wherever it names
-    // a class. A private receiver class is written `dynamic` by the producer
-    // (an `Object` parameter would make the front end insert a cast), so no
-    // class can be read from it at compile time, so the receiver is CAST to the
-    // origin class at run time before the direct call (below): a mis-paired
-    // intrinsic then throws a TypeError instead of running another class's
-    // super target on this object. The DirectCall itself never checks the
-    // receiver's class, unchecked or not.
+    // a class, which is every receiver the producer writes today: a private
+    // class is written by name too (`_HomeState self`). An entry point whose
+    // receiver is `dynamic` names no class at compile time, so the receiver
+    // is cast to the origin class at run time before the direct call (below):
+    // a mis-paired intrinsic then throws a TypeError instead of running
+    // another class's super target on this object. The DirectCall itself
+    // never checks the receiver's class, unchecked or not.
     final receiverType = fn.positionalParameters.first.type;
     if (receiverType is InterfaceType) {
       if (receiverType.classNode != rCls) {
