@@ -612,6 +612,7 @@ void Precompiler::DoCompileAll() {
 
       dispatch_table_generator_ = new compiler::DispatchTableGenerator(Z);
       dispatch_table_generator_->Initialize(IG->class_table());
+      BoxRouteBUntabledSignatures();
 
       // After finding all code, and before starting to trace, populate the
       // assets map.
@@ -1956,6 +1957,42 @@ static void AddNamesToFunctionsTable(Zone* zone,
   }
   *mangled_name = Function::CreateDynamicInvocationForwarderName(fname);
   AddNameToFunctionsTable(zone, table, *mangled_name, *dyn_function);
+}
+
+// SELFHOST (Route B): a patch replaces a method's body with bytecode, and the
+// interpreter takes and returns boxed values only. A method TFA saw called
+// dynamically already passes boxed values (a release's dynamic interface makes
+// every app method such a method), but under --route_b_untabled_overrides the
+// attach native can find any untabled method by name, including ones no
+// interface covers, and the AOT runtime keeps no record of which parameters a
+// compiled method takes unboxed, so it cannot refuse one. Box them here, before
+// anything is compiled. TFA decides unboxing per selector and this covers
+// every method of an untabled selector, interface targets included, so callers
+// and implementations still agree.
+void Precompiler::BoxRouteBUntabledSignatures() {
+  if (!FLAG_route_b_untabled_overrides) {
+    return;
+  }
+  HANDLESCOPE(T);
+  auto& lib = Library::Handle(Z);
+  auto& cls = Class::Handle(Z);
+  auto& functions = Array::Handle(Z);
+  auto& function = Function::Handle(Z);
+  for (intptr_t i = 0; i < libraries_.Length(); i++) {
+    lib ^= libraries_.At(i);
+    ClassDictionaryIterator it(lib, ClassDictionaryIterator::kIteratePrivate);
+    while (it.HasNext()) {
+      cls = it.GetNextClass();
+      functions = cls.current_functions();
+      const intptr_t length = functions.Length();
+      for (intptr_t j = 0; j < length; j++) {
+        function ^= functions.At(j);
+        if (IsRouteBUntabled(function)) {
+          function.reset_unboxed_parameters_and_return();
+        }
+      }
+    }
+  }
 }
 
 void Precompiler::CollectDynamicFunctionNames() {
