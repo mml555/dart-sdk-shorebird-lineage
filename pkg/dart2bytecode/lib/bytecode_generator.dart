@@ -453,11 +453,11 @@ class BytecodeGenerator extends RecursiveVisitor {
           constant.classNode != coreTypes.pragmaClass) {
         continue;
       }
-      for (final value in constant.fieldValues.values) {
-        if (value is StringConstant &&
-            value.value == 'shorebird:direct-super') {
-          return true;
-        }
+      // The pragma's NAME field only: `@pragma('other', 'shorebird:direct-super')`
+      // carries the string as its options and must not be diverted here.
+      final name = constant.fieldValues[coreTypes.pragmaName.fieldReference];
+      if (name is StringConstant && name.value == 'shorebird:direct-super') {
+        return true;
       }
     }
     return false;
@@ -674,6 +674,27 @@ class BytecodeGenerator extends RecursiveVisitor {
       }
     }
     if (rCls == null) _superRefusal('origin class not in the release kernel');
+    // The origin must be the class whose method this entry point replaces.
+    // Checks 1-2 prove only that the receiver is parameter 0 of SOME entry
+    // point; a stale or malformed intrinsic naming another class would bind
+    // that class's super target and call it unchecked on this receiver.
+    //
+    // Established from the entry point's own receiver type wherever it names
+    // a class. A private receiver class is written `dynamic` by the producer
+    // (an `Object` parameter would make the front end insert a cast), so no
+    // class can be read from it and the producer's pairing of the entry point
+    // with its intrinsic is the only tie there.
+    final receiverType = fn.positionalParameters.first.type;
+    if (receiverType is InterfaceType) {
+      if (receiverType.classNode != rCls) {
+        _superRefusal('the entry point receives '
+            '${receiverType.classNode.name}, not the origin class '
+            '$originClassName');
+      }
+    } else if (receiverType is! DynamicType) {
+      _superRefusal('the entry point receiver type $receiverType names no '
+          'class to check the origin against');
+    }
     final rSuper = rCls.superclass;
     if (rSuper == null) {
       _superRefusal('origin class has no superclass in the release kernel');
@@ -5342,9 +5363,18 @@ String? shorebirdPlatformDillForVerification;
 
 ast.Component? _shorebirdVerifyComponent;
 ClassHierarchy? _shorebirdVerifyHierarchy;
+// The inputs the cached component was read from. A second compile in the same
+// process with a different verification dill or platform must not verify
+// against the first one's kernel.
+String? _shorebirdVerifyKey;
 
 void _shorebirdLoadVerifier() {
-  if (_shorebirdVerifyComponent != null) return;
+  final key = '$shorebirdPlatformDillForVerification\u0000'
+      '$shorebirdPatchedVerificationDill';
+  if (_shorebirdVerifyComponent != null && _shorebirdVerifyKey == key) return;
+  _shorebirdVerifyComponent = null;
+  _shorebirdVerifyHierarchy = null;
+  _shorebirdVerifyKey = null;
   final path = shorebirdPatchedVerificationDill;
   if (path == null) {
     throw 'Route B direct-super intrinsic refused: no '
@@ -5362,6 +5392,7 @@ void _shorebirdLoadVerifier() {
   _shorebirdVerifyComponent = component;
   _shorebirdVerifyHierarchy =
       ClassHierarchy(component, CoreTypes(component));
+  _shorebirdVerifyKey = key;
 }
 
 
