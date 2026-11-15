@@ -16,7 +16,55 @@
 #define Z zone_
 
 namespace dart {
+
+// Route B (selfhost). A dispatch-table call loads a raw entry point out of the
+// table and sets up neither the callee's Function nor an arguments descriptor,
+// so Function::AttachBytecode cannot redirect it, and the framework reaches
+// every Widget.build, State.initState and friends that way. A selector with no
+// table offset stays an ordinary switchable instance call instead
+// (AotCallSpecializer leaves the call alone when GetSelector is null), and the
+// switchable-call stubs load the Function and the descriptor before jumping
+// through Function.entry_point_: exactly what the InterpretCall stub needs.
+//
+// So under this flag a regular method implemented in an app library keeps its
+// selector out of the table. Getters, setters and fields stay tabled (an app
+// field named `child` would otherwise untable every `widget.child` read in the
+// framework), as do a few selectors hot enough to be called everywhere.
+DEFINE_FLAG(bool,
+            route_b_untabled_overrides,
+            false,
+            "AOT: keep selectors of regular methods implemented outside dart: "
+            "and package:flutter/ out of the dispatch table, so a Route B "
+            "patch can redirect their calls.");
+
 namespace compiler {
+
+// Libraries whose method implementations never untable a selector: the SDK and
+// the framework override the hot selectors constantly, and are not what a
+// patch replaces.
+static bool IsRouteBAppLibrary(const Library& library) {
+  const String& url = String::Handle(library.url());
+  return !url.StartsWith(String::Handle(String::New("dart:"))) &&
+         !url.StartsWith(String::Handle(String::New("package:flutter/")));
+}
+
+static bool IsRouteBUntabledCandidate(const Function& function) {
+  // The caller has already established IsDynamicFunction(allow_abstract=false).
+  if (!function.IsRegularFunction() || !function.is_visible()) {
+    return false;
+  }
+  const String& name = String::Handle(function.name());
+  // Called everywhere, from the SDK as often as from the app; untabling them
+  // would tax the whole program to patch a body that rarely needs it.
+  static const char* const kHotSelectors[] = {
+      "==", "toString", "noSuchMethod", "call", "compareTo", "moveNext",
+  };
+  for (const char* hot : kHotSelectors) {
+    if (name.Equals(hot)) return false;
+  }
+  const Class& owner = Class::Handle(function.Owner());
+  return IsRouteBAppLibrary(Library::Handle(owner.library()));
+}
 
 class Interval {
  public:
@@ -378,6 +426,13 @@ const TableSelector* SelectorMap::GetSelector(
   return GetSelector(sid);
 }
 
+bool SelectorMap::IsRouteBUntabled(const Function& interface_target) const {
+  const int32_t sid = SelectorId(interface_target);
+  if (sid == kInvalidSelectorId) return false;
+  const TableSelector& selector = selectors_[sid];
+  return selector.route_b_untabled && selector.IsUsed();
+}
+
 const TableSelector* SelectorMap::GetSelector(int32_t sid) const {
   if (sid == kInvalidSelectorId) return nullptr;
   const TableSelector* selector = &selectors_[sid];
@@ -472,6 +527,10 @@ void DispatchTableGenerator::NumberSelectors() {
             }
             selector_map_.SetSelectorProperties(sid, on_null_interface,
                                                 requires_args_descriptor);
+            if (FLAG_route_b_untabled_overrides &&
+                IsRouteBUntabledCandidate(function)) {
+              selector_map_.selectors_[sid].route_b_untabled = true;
+            }
           }
         }
       }
@@ -665,6 +724,9 @@ void DispatchTableGenerator::SetupSelectorRows() {
   // same tree.
   for (intptr_t i = 0; i < num_selectors_; i++) {
     const TableSelector& selector = selector_map_.selectors_[i];
+    // SELFHOST (Route B): an untabled selector gets no row and so no offset,
+    // which is what makes GetSelector return null for its call sites.
+    if (selector.route_b_untabled) continue;
     if (selector.IsUsed() && selector_rows[i].Finalize()) {
       table_rows_.Add(&selector_rows[i]);
     }

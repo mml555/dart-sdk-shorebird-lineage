@@ -51,6 +51,10 @@ struct TableSelector {
   bool on_null_interface = false;
   // Do any targets of this selector assume that an args descriptor is passed?
   bool requires_args_descriptor = false;
+  // SELFHOST (Route B): kept out of the dispatch table so its call sites stay
+  // switchable calls, which reach a patched body. See
+  // --route_b_untabled_overrides in dispatch_table_generator.cc.
+  bool route_b_untabled = false;
 };
 
 class SelectorMap {
@@ -62,6 +66,11 @@ class SelectorMap {
   const TableSelector* GetSelector(const Function& interface_target) const;
 
   const TableSelector* GetSelector(int32_t sid) const;
+
+  // SELFHOST (Route B): whether --route_b_untabled_overrides kept this
+  // target's selector out of the dispatch table, so its call sites are
+  // switchable calls. GetSelector() answers null for such a selector.
+  bool IsRouteBUntabled(const Function& interface_target) const;
 
  private:
   static constexpr int32_t kInvalidSelectorId =

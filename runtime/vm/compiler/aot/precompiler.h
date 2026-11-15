@@ -260,6 +260,14 @@ class Precompiler : public ValueObject {
     return dispatch_table_generator_->selector_map();
   }
 
+  // SELFHOST (Route B): see SelectorMap::IsRouteBUntabled. Always false once
+  // FinalizeDispatchTable has run; every function is compiled and traced by
+  // then, so nothing asks later.
+  bool IsRouteBUntabled(const Function& function) {
+    return dispatch_table_generator_ != nullptr &&
+           selector_map()->IsRouteBUntabled(function);
+  }
+
   static Precompiler* Instance() { return singleton_; }
 
   void AddField(const Field& field);
