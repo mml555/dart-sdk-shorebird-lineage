@@ -35,6 +35,7 @@ import 'package:vm/transformations/prefix_library_uris.dart'
 
 import 'bytecode_serialization.dart' show BytecodeSizeStatistics;
 import 'bytecode_generator.dart' show generateBytecode;
+import 'bytecode_generator.dart' as bg;
 import 'options.dart' show BytecodeOptions;
 
 final ArgParser _argParser = ArgParser(allowTrailingOptions: true)
@@ -55,6 +56,14 @@ final ArgParser _argParser = ArgParser(allowTrailingOptions: true)
     defaultsTo: null,
   )
   ..addOption('depfile', help: 'Path to output Ninja depfile')
+  // Route B (selfhost) 0017. VERIFICATION ONLY: never merged into the
+  // binding universe. --import-dill stays the shipped program the
+  // replacement binds against.
+  ..addOption(
+    'patched-verification-dill',
+    help: 'Path to a --no-aot kernel of the PATCHED sources, used only '
+        'to verify direct-super sites',
+  )
   ..addOption(
     'depfile-target',
     help: 'Override the target in the generated depfile',
@@ -183,6 +192,9 @@ Future<void> main(List<String> arguments) async {
 Future<int> runCompilerWithCommandLineArguments(List<String> arguments) async {
   final ArgResults options = _argParser.parse(arguments);
   final String? platformKernel = options['platform'];
+  bg.shorebirdPatchedVerificationDill =
+      options['patched-verification-dill'];
+  bg.shorebirdPlatformDillForVerification = platformKernel;
 
   if (options['help']) {
     print(_usage);
