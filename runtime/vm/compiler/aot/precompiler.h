@@ -375,6 +375,7 @@ class Precompiler : public ValueObject {
 
   void Obfuscate();
 
+  void BoxRouteBUntabledSignatures();
   void CollectDynamicFunctionNames();
 
   void PrecompileStaticInitializers();
