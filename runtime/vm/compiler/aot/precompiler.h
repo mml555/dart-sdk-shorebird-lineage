@@ -19,6 +19,10 @@
 #include "vm/timer.h"
 
 namespace dart {
+DECLARE_FLAG(bool, route_b_untabled_overrides);
+}  // namespace dart
+
+namespace dart {
 
 // Forward declarations.
 class Class;
@@ -260,6 +264,19 @@ class Precompiler : public ValueObject {
     return dispatch_table_generator_->selector_map();
   }
 
+  // SELFHOST (Route B): see SelectorMap::IsRouteBUntabled. Always false once
+  // FinalizeDispatchTable has run; every function is compiled and traced by
+  // then, so nothing asks later. Callers ask about every function they meet,
+  // so this answers false without reading kernel metadata unless the flag is
+  // on and the function can have a selector at all: a synthetic function has
+  // no procedure attributes to read.
+  bool IsRouteBUntabled(const Function& function) {
+    return FLAG_route_b_untabled_overrides &&
+           dispatch_table_generator_ != nullptr &&
+           function.IsDynamicFunction(/*allow_abstract=*/true) &&
+           selector_map()->IsRouteBUntabled(function);
+  }
+
   static Precompiler* Instance() { return singleton_; }
 
   void AddField(const Field& field);
@@ -358,6 +375,7 @@ class Precompiler : public ValueObject {
 
   void Obfuscate();
 
+  void BoxRouteBUntabledSignatures();
   void CollectDynamicFunctionNames();
 
   void PrecompileStaticInitializers();
@@ -405,7 +423,7 @@ class Precompiler : public ValueObject {
   ProgramElementSet api_uses_;
   Error& error_;
 
-  compiler::DispatchTableGenerator* dispatch_table_generator_;
+  compiler::DispatchTableGenerator* dispatch_table_generator_ = nullptr;
 
   bool get_runtime_type_is_unique_;
 
