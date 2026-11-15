@@ -643,6 +643,13 @@ class BytecodeGenerator extends RecursiveVisitor {
       _superRefusal('no dispatch target for $memberName above $originClassName '
           'in the patched kernel');
     }
+    // A zero-argument super METHOD call only. A getter would be lowered as a
+    // plain call and lose the step that calls its result.
+    if (vResolved.kind != ProcedureKind.Method || vResolved.isAbstract) {
+      _superRefusal('the patched super target $memberName is not a concrete '
+          'method (${vResolved.kind.name}'
+          '${vResolved.isAbstract ? ', abstract' : ''})');
+    }
 
     final expected = <Object>[
       expectedFileUri,
@@ -692,8 +699,11 @@ class BytecodeGenerator extends RecursiveVisitor {
     // Established from the entry point's own receiver type wherever it names
     // a class. A private receiver class is written `dynamic` by the producer
     // (an `Object` parameter would make the front end insert a cast), so no
-    // class can be read from it and the producer's pairing of the entry point
-    // with its intrinsic is the only tie there.
+    // class can be read from it at compile time, so the receiver is CAST to the
+    // origin class at run time before the direct call (below): a mis-paired
+    // intrinsic then throws a TypeError instead of running another class's
+    // super target on this object. The DirectCall itself never checks the
+    // receiver's class, unchecked or not.
     final receiverType = fn.positionalParameters.first.type;
     if (receiverType is InterfaceType) {
       if (receiverType.classNode != rCls) {
@@ -717,6 +727,11 @@ class BytecodeGenerator extends RecursiveVisitor {
       _superRefusal('no dispatch target for $memberName above $originClassName '
           'in the release kernel');
     }
+    if (resolved.kind != ProcedureKind.Method || resolved.isAbstract) {
+      _superRefusal('the release super target $memberName is not a concrete '
+          'method (${resolved.kind.name}'
+          '${resolved.isAbstract ? ', abstract' : ''})');
+    }
     final releaseFingerprint = print4(resolved);
     if (releaseFingerprint != expected) {
       // Verification success must not authorize an unrelated release Procedure.
@@ -738,6 +753,14 @@ class BytecodeGenerator extends RecursiveVisitor {
 
     final noArgs = Arguments(const <Expression>[])..parent = node;
     _genArguments(receiver, noArgs);
+    if (receiverType is DynamicType) {
+      _genAssertAssignable(
+        InterfaceType(rCls, Nullability.nonNullable, [
+          for (final _ in rCls.typeParameters) const DynamicType(),
+        ]),
+        message: symbolForTypeCast,
+      );
+    }
     _genDirectCallWithArgs(resolved, noArgs,
         hasReceiver: true, isUnchecked: true, node: node);
   }
