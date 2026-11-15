@@ -10,6 +10,7 @@ from __future__ import print_function
 import argparse
 import hashlib
 import os
+import re
 import sys
 import utils
 
@@ -66,11 +67,15 @@ def FormatVersionString(version,
 
     git_hash = None
     # If we need SDK hash and git usage is not suppressed then try to get it.
-    if sdk_hash and not no_sdk_hash:
+    if sdk_hash is not None and not no_sdk_hash:
         # A pinned dart_sdk_verification_hash. Kernels are stamped with it, so
         # the VM must check against the same value rather than the checkout's
         # HEAD, which differs whenever the VM carries changes the kernel
-        # format does not.
+        # format does not. A malformed pin is an error, never the fallback
+        # below: '0000000000' turns the VM's kernel check off.
+        if not re.fullmatch('[0-9a-f]{10}', sdk_hash):
+            raise ValueError(
+                '--sdk-hash must be 10 lowercase hex digits, got %r' % sdk_hash)
         git_hash = sdk_hash
     elif not no_sdk_hash and not no_git_hash:
         git_hash = utils.GetShortGitHash()
