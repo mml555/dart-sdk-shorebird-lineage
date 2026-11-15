@@ -1067,8 +1067,17 @@ ObjectPtr BytecodeReaderHelper::ReadObject() {
     AlternativeReadingScope alt(&reader_, offset);
     header = reader_.ReadUInt();
 
+    const intptr_t stand_ins_before = stand_ins_made_;
     obj = ReadObjectContents(header);
     ASSERT(obj->IsHeapObject());
+    // [selfhost] A stand-in is never cached: the object table is shared by
+    // every read of this member, and a direct call (`super.foo()`) reading it
+    // later must still fail to load, as before, rather than get an abstract
+    // function it would try to compile at run time. See
+    // InterfaceTargetStandIn.
+    if (stand_ins_made_ != stand_ins_before) {
+      return obj;
+    }
     {
       REUSABLE_OBJECT_HANDLESCOPE(thread_);
       Object& obj_handle = thread_->ObjectHandle();
@@ -1099,7 +1108,8 @@ ObjectPtr BytecodeReaderHelper::ReadObject() {
 // list compiles every List method), so the loader supplies a stand-in carrying
 // the name. It is owned by the class it was looked up in, never added to it, so
 // no lookup can find it, and it is only ever produced for an interface-call
-// target. A receiver with no implementation left gets NoSuchMethodError from
+// target. ReadObject does not cache it, so a later non-interface read of the
+// same member resolves again and fails to load as it always did. A receiver with no implementation left gets NoSuchMethodError from
 // the call, as any dynamic dispatch miss does, instead of a load-time abort.
 ObjectPtr BytecodeReaderHelper::ReadInterfaceTarget() {
   ASSERT(!reading_interface_target_);
@@ -1111,6 +1121,7 @@ ObjectPtr BytecodeReaderHelper::ReadInterfaceTarget() {
 
 FunctionPtr BytecodeReaderHelper::InterfaceTargetStandIn(const Class& cls,
                                                          const String& name) {
+  stand_ins_made_++;
   UntaggedFunction::Kind kind = UntaggedFunction::kRegularFunction;
   if (Field::IsGetterName(name)) {
     kind = UntaggedFunction::kGetterFunction;
