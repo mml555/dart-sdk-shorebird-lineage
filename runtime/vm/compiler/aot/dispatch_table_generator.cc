@@ -8,6 +8,7 @@
 
 #include <memory>
 
+#include "vm/compiler/aot/precompiler.h"
 #include "vm/compiler/frontend/kernel_translation_helper.h"
 #include "vm/dispatch_table.h"
 #include "vm/stub_code.h"
@@ -433,6 +434,13 @@ bool SelectorMap::IsRouteBUntabled(const Function& interface_target) const {
   return selector.route_b_untabled && selector.IsUsed();
 }
 
+bool SelectorMap::IsRouteBSdkNameLookup(
+    const Function& interface_target) const {
+  const int32_t sid = SelectorId(interface_target);
+  if (sid == kInvalidSelectorId) return false;
+  return selectors_[sid].route_b_sdk_name_lookup;
+}
+
 const TableSelector* SelectorMap::GetSelector(int32_t sid) const {
   if (sid == kInvalidSelectorId) return nullptr;
   const TableSelector* selector = &selectors_[sid];
@@ -530,6 +538,12 @@ void DispatchTableGenerator::NumberSelectors() {
             if (FLAG_route_b_untabled_overrides &&
                 IsRouteBUntabledCandidate(function)) {
               selector_map_.selectors_[sid].route_b_untabled = true;
+            }
+            // SELFHOST (Route B): see TableSelector::route_b_sdk_name_lookup.
+            // Marked from the implementations because the precompiler keeps
+            // only those findable by name; abstract members share the id.
+            if (Precompiler::Instance()->IsRouteBSdkNameLookup(function)) {
+              selector_map_.selectors_[sid].route_b_sdk_name_lookup = true;
             }
           }
         }

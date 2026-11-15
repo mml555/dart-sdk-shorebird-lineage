@@ -55,6 +55,11 @@ struct TableSelector {
   // switchable calls, which reach a patched body. See
   // --route_b_untabled_overrides in dispatch_table_generator.cc.
   bool route_b_untabled = false;
+  // SELFHOST (Route B): an implementation is an SDK member patch bytecode can
+  // look up by name (Precompiler::IsRouteBSdkNameLookup), so every target of
+  // the selector takes its arguments on the stack. The interpreter calls
+  // compiled code with every argument on the stack.
+  bool route_b_sdk_name_lookup = false;
 };
 
 class SelectorMap {
@@ -71,6 +76,10 @@ class SelectorMap {
   // target's selector out of the dispatch table, so its call sites are
   // switchable calls. GetSelector() answers null for such a selector.
   bool IsRouteBUntabled(const Function& interface_target) const;
+
+  // SELFHOST (Route B): whether an implementation of this target's selector is
+  // looked up by name from patch bytecode; see TableSelector.
+  bool IsRouteBSdkNameLookup(const Function& interface_target) const;
 
  private:
   static constexpr int32_t kInvalidSelectorId =

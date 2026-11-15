@@ -681,7 +681,7 @@ intptr_t BytecodeReaderHelper::ReadConstantPool(const Function& function,
         obj = ReadObject();
       } break;
       case ConstantPoolTag::kInterfaceCall: {
-        elem = ReadObject();
+        elem = ReadInterfaceTarget();
         ASSERT(elem.IsFunction());
         // InterfaceCall constant occupies 2 entries.
         // The first entry is used for interface target.
@@ -695,7 +695,7 @@ intptr_t BytecodeReaderHelper::ReadConstantPool(const Function& function,
         obj = ReadObject();
       } break;
       case ConstantPoolTag::kInstantiatedInterfaceCall: {
-        elem = ReadObject();
+        elem = ReadInterfaceTarget();
         ASSERT(elem.IsFunction());
         // InstantiatedInterfaceCall constant occupies 3 entries:
         // 1) Interface target.
@@ -1067,8 +1067,17 @@ ObjectPtr BytecodeReaderHelper::ReadObject() {
     AlternativeReadingScope alt(&reader_, offset);
     header = reader_.ReadUInt();
 
+    const intptr_t stand_ins_before = stand_ins_made_;
     obj = ReadObjectContents(header);
     ASSERT(obj->IsHeapObject());
+    // [selfhost] A stand-in is never cached: the object table is shared by
+    // every read of this member, and a direct call (`super.foo()`) reading it
+    // later must still fail to load, as before, rather than get an abstract
+    // function it would try to compile at run time. See
+    // InterfaceTargetStandIn.
+    if (stand_ins_made_ != stand_ins_before) {
+      return obj;
+    }
     {
       REUSABLE_OBJECT_HANDLESCOPE(thread_);
       Object& obj_handle = thread_->ObjectHandle();
@@ -1079,6 +1088,53 @@ ObjectPtr BytecodeReaderHelper::ReadObject() {
   }
 
   return ReadObjectContents(header);
+}
+
+// [selfhost] Route B: an interface call needs only its target's NAME.
+//
+// InterfaceCall, UncheckedInterfaceCall and InstantiatedInterfaceCall all read
+// `target->untag()->name()` from the pool and dispatch on the receiver's class
+// (Interpreter::InstanceCall); nothing else of the target function is used.
+// But the pool entry names the member the call was RESOLVED against, which for
+// `list.add(x)` is the abstract `List.add`, and AOT tree-shakes abstract members
+// nothing calls by name. Loading a patch that makes such a call aborted the app:
+//
+//   bytecode_reader.cc: error: Unable to find function add in
+//   Library:'dart:core' Class: List
+//
+// even though `_GrowableList.add`, the method the call reaches, was compiled.
+// Retaining the abstract members instead costs every release the code of every
+// implementation (+0.98 MB for List alone on a 5.7 MB snapshot: each typed-data
+// list compiles every List method), so the loader supplies a stand-in carrying
+// the name. It is owned by the class it was looked up in, never added to it, so
+// no lookup can find it, and it is only ever produced for an interface-call
+// target. ReadObject does not cache it, so a later non-interface read of the
+// same member resolves again and fails to load as it always did. A receiver with no implementation left gets NoSuchMethodError from
+// the call, as any dynamic dispatch miss does, instead of a load-time abort.
+ObjectPtr BytecodeReaderHelper::ReadInterfaceTarget() {
+  ASSERT(!reading_interface_target_);
+  reading_interface_target_ = true;
+  const Object& target = Object::Handle(Z, ReadObject());
+  reading_interface_target_ = false;
+  return target.ptr();
+}
+
+FunctionPtr BytecodeReaderHelper::InterfaceTargetStandIn(const Class& cls,
+                                                         const String& name) {
+  stand_ins_made_++;
+  UntaggedFunction::Kind kind = UntaggedFunction::kRegularFunction;
+  if (Field::IsGetterName(name)) {
+    kind = UntaggedFunction::kGetterFunction;
+  } else if (Field::IsSetterName(name)) {
+    kind = UntaggedFunction::kSetterFunction;
+  }
+  const FunctionType& signature = FunctionType::Handle(Z, FunctionType::New());
+  const Function& stand_in = Function::Handle(
+      Z, Function::New(signature, name, kind, /*is_static=*/false,
+                       /*is_const=*/false, /*is_abstract=*/true,
+                       /*is_external=*/false, /*is_native=*/false, cls,
+                       TokenPosition::kNoSource));
+  return stand_in.ptr();
 }
 
 StringPtr BytecodeReaderHelper::ConstructorName(const Class& cls,
@@ -1223,6 +1279,9 @@ ObjectPtr BytecodeReaderHelper::ReadObjectContents(uint32_t header) {
                 return function;
               }
             }
+          }
+          if (reading_interface_target_ && !is_constructor) {
+            return InterfaceTargetStandIn(cls, name);
           }
           FATAL("Unable to find function %s in %s", name.ToCString(),
                 cls.ToCString());
