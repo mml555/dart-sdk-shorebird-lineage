@@ -527,11 +527,7 @@ class BytecodeGenerator extends RecursiveVisitor {
     //    including the two that should have passed. The pragma is the property
     //    actually wanted and it does not depend on emission order.
     final enclosing = enclosingMember;
-    if (enclosing == null ||
-        pragmaParser
-            .parsedPragmas<ParsedDynModuleEntryPointPragma>(
-                enclosing.annotations)
-            .isEmpty) {
+    if (enclosing == null || !enclosing.isDynModuleEntryPoint(coreTypes)) {
       _superRefusal('used outside the dynamic-module entry point');
     }
 
@@ -741,13 +737,15 @@ class BytecodeGenerator extends RecursiveVisitor {
         '${resolved.enclosingClass?.name}');
     print('ROUTE_B_SUPER: emitting receiver-taking direct call');
 
-    final noArgs = Arguments(const <Expression>[])..parent = node;
+    final noArgs = Arguments(ExpressionList.empty)..parent = node;
     _genArguments(receiver, noArgs);
     if (receiverType is DynamicType) {
       _genAssertAssignable(
-        InterfaceType(rCls, Nullability.nonNullable, [
-          for (final _ in rCls.typeParameters) const DynamicType(),
-        ]),
+        InterfaceType(
+          rCls,
+          Nullability.nonNullable,
+          DartTypeList.filledWithDynamic(rCls.typeParameters.length),
+        ),
         message: symbolForTypeCast,
       );
     }
