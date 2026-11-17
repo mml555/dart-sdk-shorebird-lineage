@@ -1893,7 +1893,7 @@ DART_EXPORT intptr_t Dart_SnapshotInstrSize(
   }
   // snapshot_size() is the whole image including its header, which is what the
   // engine maps. (Image::kHeaderSize itself is private.)
-  const Image image(snapshot_instructions);
+  const TextImage image(snapshot_instructions);
   return static_cast<intptr_t>(image.snapshot_size());
 }
 // --- end Shorebird code-push support -------------------------------------
