@@ -249,6 +249,27 @@ DART_ROUTE_B_EXPORT int32_t Dart_RouteBActivatePatchTraced(
     const char* caller_name,
     int64_t pool_offset);
 
+// Returned by `Dart_RouteBDeactivatePatch` when the target resolves but has
+// nothing to put back: no bytecode is attached to it, or this process saved no
+// original Code for it (it was never attached here, or was already restored).
+// Outside `Dart_RouteBResult` so that `dart_api.h` needs no edit.
+#define DART_ROUTE_B_NOT_ATTACHED 100
+
+// Route B: put back the Code `library_uri`'s `target_name` had before
+// `Dart_RouteBActivatePatch` (or its traced sibling) attached bytecode to it in
+// this process. The isolate must be current, as for the attach.
+//
+// For the embedder's pre-main hook: when a container's later target fails, it
+// rolls back the targets it already attached, newest first, so main runs the
+// release's code rather than a partly patched app.
+//
+// Returns `Dart_RouteB_Ok` once the original Code is back,
+// `Dart_RouteB_NoIsolate`, `Dart_RouteB_TargetMissing` when the target does not
+// resolve, `DART_ROUTE_B_NOT_ATTACHED`, or `Dart_RouteB_Unsupported` in a build
+// without dynamic modules.
+DART_ROUTE_B_EXPORT int32_t Dart_RouteBDeactivatePatch(const char* library_uri,
+                                                       const char* target_name);
+
 #if defined(__cplusplus)
 }  // extern "C"
 #endif
