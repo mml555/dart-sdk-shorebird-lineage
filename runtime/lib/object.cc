@@ -1350,8 +1350,6 @@ static int32_t RouteBActivatePatchImpl(const uint8_t* payload,
 #endif
 }
 
-// The release identity of the running snapshot, as lowercase hex, or nullptr.
-//
 // Route B (selfhost): put back the Code a target had before
 // Dart_RouteBActivatePatch attached bytecode to it.
 //
@@ -1406,6 +1404,8 @@ DART_ROUTE_B_EXPORT int32_t Dart_RouteBDeactivatePatch(const char* library_uri,
 #endif  // defined(DART_DYNAMIC_MODULES)
 }
 
+// The release identity of the running snapshot, as lowercase hex, or nullptr.
+//
 // Same GNU build ID that Internal_releaseBuildId exposes to Dart. It is
 // duplicated as a C API rather than shared because the caller is the embedder's
 // pre-main hook: it must reject a patch built for another release BEFORE

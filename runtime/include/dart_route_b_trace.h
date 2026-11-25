@@ -52,7 +52,7 @@
 #else
 #define DART_ROUTE_B_EXPORT                                                    \
   DART_ROUTE_B_EXTERN_C __attribute__((visibility("default")))                 \
-      __attribute((used))
+  __attribute((used))
 #endif
 
 #if defined(__cplusplus)
@@ -240,14 +240,14 @@ typedef struct {
 // it is this is the original function. It is deliberately NOT a gate: the attach
 // path's decisions are unchanged, because a diagnostic that alters what it
 // measures cannot settle what the un-instrumented build does.
-DART_ROUTE_B_EXPORT int32_t Dart_RouteBActivatePatchTraced(
-    const uint8_t* payload,
-    intptr_t payload_length,
-    const char* library_uri,
-    const char* target_name,
-    Dart_RouteBTrace* trace,
-    const char* caller_name,
-    int64_t pool_offset);
+DART_ROUTE_B_EXPORT int32_t
+Dart_RouteBActivatePatchTraced(const uint8_t* payload,
+                               intptr_t payload_length,
+                               const char* library_uri,
+                               const char* target_name,
+                               Dart_RouteBTrace* trace,
+                               const char* caller_name,
+                               int64_t pool_offset);
 
 // Returned by `Dart_RouteBDeactivatePatch` when the target resolves but has
 // nothing to put back: no bytecode is attached to it, or this process saved no
@@ -262,6 +262,13 @@ DART_ROUTE_B_EXPORT int32_t Dart_RouteBActivatePatchTraced(
 // For the embedder's pre-main hook: when a container's later target fails, it
 // rolls back the targets it already attached, newest first, so main runs the
 // release's code rather than a partly patched app.
+//
+// The saved Code is keyed by the function alone, not by who attached it: this
+// restores whatever attach saved it, including one made by another caller (a
+// Dart `attachBytecodeToFunction`, or an earlier container in this process).
+// Call it only for targets this caller attached itself and got
+// `Dart_RouteB_Ok` for; never for one that answered
+// `Dart_RouteB_AlreadyInterpreted`.
 //
 // Returns `Dart_RouteB_Ok` once the original Code is back,
 // `Dart_RouteB_NoIsolate`, `Dart_RouteB_TargetMissing` when the target does not
