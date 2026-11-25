@@ -1350,6 +1350,60 @@ static int32_t RouteBActivatePatchImpl(const uint8_t* payload,
 #endif
 }
 
+// Route B (selfhost): put back the Code a target had before
+// Dart_RouteBActivatePatch attached bytecode to it.
+//
+// THE EMBEDDER'S ROLLBACK. A container with several targets is applied one
+// target at a time, and each attach validates before it mutates, so a failing
+// target leaves itself untouched -- but the targets attached before it stay
+// attached. Without a way back, that launch runs a mix of patched and release
+// code. The pre-main hook calls this for each target it attached when a later
+// one failed, newest first, so main runs the release's code throughout.
+//
+// The same restore as Internal_detachBytecodeFromFunction, which the 8a device
+// gate proved (OLD -> NEW -> OLD in one process), reached from C++ instead of
+// Dart because no Dart may run before main.
+DART_ROUTE_B_EXPORT int32_t Dart_RouteBDeactivatePatch(const char* library_uri,
+                                                       const char* target_name) {
+#if defined(DART_DYNAMIC_MODULES)
+  Thread* thread = Thread::Current();
+  if (thread == nullptr || thread->isolate() == nullptr) {
+    OS::PrintErr("ROUTEB: no current isolate\n");
+    return Dart_RouteB_NoIsolate;
+  }
+  if (library_uri == nullptr || target_name == nullptr) {
+    return Dart_RouteB_TargetMissing;
+  }
+  DARTSCOPE(thread);
+  Zone* zone = thread->zone();
+  const String& uri = String::Handle(zone, String::New(library_uri));
+  const String& name = String::Handle(zone, String::New(target_name));
+
+  SafepointWriteRwLocker ml(thread, thread->isolate_group()->program_lock());
+  const auto& target =
+      Function::Handle(zone, ResolvePatchTarget(thread, zone, uri, name));
+  if (target.IsNull()) {
+    OS::PrintErr("ROUTEB: rollback: target %s not found in %s\n", target_name,
+                 library_uri);
+    return Dart_RouteB_TargetMissing;
+  }
+  if (!target.HasBytecode()) {
+    OS::PrintErr("ROUTEB: rollback: %s has no bytecode attached\n",
+                 target_name);
+    return DART_ROUTE_B_NOT_ATTACHED;
+  }
+  const auto& original = Code::Handle(zone, RouteBTakeOriginalCode(target));
+  if (original.IsNull()) {
+    OS::PrintErr("ROUTEB: rollback: no saved code for %s\n", target_name);
+    return DART_ROUTE_B_NOT_ATTACHED;
+  }
+  target.RestoreCodeFromBytecode(original);
+  return Dart_RouteB_Ok;
+#else
+  return Dart_RouteB_Unsupported;
+#endif  // defined(DART_DYNAMIC_MODULES)
+}
+
 // The release identity of the running snapshot, as lowercase hex, or nullptr.
 //
 // Same GNU build ID that Internal_releaseBuildId exposes to Dart. It is
