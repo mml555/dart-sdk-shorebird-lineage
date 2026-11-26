@@ -782,6 +782,16 @@ action("write_revision_file") {
   ]
   if (!dart_version_git_info) {
     args += [ "--no-git-hash" ]
+  } else if (verify_sdk_hash) {
+    # The script asks git for HEAD, which ninja cannot see. Without the hash on
+    # the command line, an incremental build after HEAD moved rebuilt every
+    # binary beside this file and left the old revision in it. sdk_hash is the
+    # revision gn saw, so a new HEAD changes the command and reruns the action,
+    # and the script refuses a revision that does not start with it.
+    args += [
+      "--expect-prefix",
+      sdk_hash,
+    ]
   }
 }
 
