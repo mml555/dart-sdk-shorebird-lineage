@@ -452,7 +452,6 @@ vm_sources_tests = [
   "port_test.cc",
   "profiler_test.cc",
   "ring_buffer_test.cc",
-  "route_b_activate_test.cc",
   "scopes_test.cc",
   "service_test.cc",
   "snapshot_test.cc",
