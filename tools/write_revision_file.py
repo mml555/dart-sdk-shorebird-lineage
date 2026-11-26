@@ -20,6 +20,11 @@ def ParseArgs(args):
                         help='Omit the git hash in the output',
                         dest='no_git_hash',
                         action='store_true')
+    parser.add_argument(
+        '--expect-prefix',
+        type=str,
+        default=None,
+        help='Fail unless the revision starts with this (the gn-time hash)')
 
     return parser.parse_args(args)
 
@@ -30,6 +35,13 @@ def Main(argv):
         revision = utils.GetGitRevision()
     else:
         revision = ''
+    if (revision and args.expect_prefix and
+            not revision.startswith(args.expect_prefix)):
+        sys.stderr.write(
+            'write_revision_file: git HEAD is %s but gn was generated at %s. '
+            'Rerun gn so the build and its revision file agree.\n' %
+            (revision, args.expect_prefix))
+        return 1
     if revision is not None:
         with open(args.output, 'w') as f:
             f.write('%s\n' % revision)
