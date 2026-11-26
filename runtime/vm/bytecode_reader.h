@@ -24,6 +24,14 @@ class BytecodeLoader {
   ~BytecodeLoader();
 
   FunctionPtr LoadBytecode(bool load_code = true);
+
+  // The URI of the first library this binary declares that is already loaded
+  // in the current isolate group, or null if none is. LoadBytecode throws a
+  // Dart StateError for such a binary, which needs a Dart frame to land in;
+  // a caller with no Dart on the stack (an embedder's pre-main hook) asks
+  // this first and refuses instead. Does not mutate the program. Must be
+  // called with the program lock held, like LoadBytecode.
+  StringPtr FindAlreadyLoadedLibrary();
   void LoadPendingCode();
 
   TypedDataBasePtr binary() const { return binary_.ptr(); }
@@ -251,6 +259,9 @@ class BytecodeReaderHelper : public ValueObject {
                                const GrowableObjectArray& pending_objects,
                                bool load_code);
   void ReadPendingCode(const GrowableObjectArray& pending_objects);
+  // Non-throwing form of the "library is already loaded" check that
+  // ReadLibraryDeclarations enforces. Returns the first such URI or null.
+  StringPtr FindAlreadyLoadedLibrary(intptr_t num_libraries);
   void FindModifiedLibraries(BitVector* modified_libs, intptr_t num_libraries);
 
   LibraryPtr ReadMain();
