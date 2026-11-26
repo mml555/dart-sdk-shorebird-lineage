@@ -1091,12 +1091,13 @@ static int32_t RouteBActivatePatchImpl(const uint8_t* payload,
   {
     SafepointWriteRwLocker ml(thread, thread->isolate_group()->program_lock());
 
-    bytecode::BytecodeLoader loader(thread, typed_data);
-    loaded = loader.LoadBytecode();
-    if (loaded.IsNull()) {
-      OS::PrintErr("ROUTEB: LoadBytecode returned null\n");
-      return Dart_RouteB_InvalidBytecode;
-    }
+    // RESOLVE AND CHECK THE TARGET BEFORE LOADING ANYTHING. Loading declares the
+    // payload's libraries into the program, which is a mutation, and a missing
+    // or already-interpreted target must leave the program pristine. It also
+    // matters for a second root isolate in the same isolate group: the first
+    // one's activation left the payload's libraries loaded and the target
+    // interpreted, so the target check answers it (AlreadyInterpreted) before
+    // the loader is asked to load them a second time.
     target = ResolvePatchTarget(thread, zone, uri, name);
     if (target.IsNull()) {
       // Distinct from a bytecode problem on purpose: this one is almost always
@@ -1110,6 +1111,30 @@ static int32_t RouteBActivatePatchImpl(const uint8_t* payload,
     if (target.IsInterpreted()) {
       OS::PrintErr("ROUTEB: %s already interpreted\n", target_name);
       return Dart_RouteB_AlreadyInterpreted;
+    }
+
+    bytecode::BytecodeLoader loader(thread, typed_data);
+
+    // LoadBytecode REPORTS "this library is already loaded" BY THROWING a Dart
+    // StateError, and this function runs with no Dart frame on the stack (the
+    // embedder's pre-main hook): there is no handler for the throw to land in,
+    // so it crashes the process in Exceptions::JumpToFrame. A LongJumpScope does
+    // not help, because ThrowExceptionHelper insists no long jump base is set
+    // (RELEASE_ASSERT) and looks for Dart frames instead. So ask the loader
+    // first, without throwing, and refuse. Under the program lock held here the
+    // answer cannot change before LoadBytecode runs.
+    const String& already_loaded =
+        String::Handle(zone, loader.FindAlreadyLoadedLibrary());
+    if (!already_loaded.IsNull()) {
+      OS::PrintErr("ROUTEB: payload library %s is already loaded\n",
+                   already_loaded.ToCString());
+      return Dart_RouteB_InvalidBytecode;
+    }
+
+    loaded = loader.LoadBytecode();
+    if (loaded.IsNull()) {
+      OS::PrintErr("ROUTEB: LoadBytecode returned null\n");
+      return Dart_RouteB_InvalidBytecode;
     }
     const auto& bc = Bytecode::Handle(zone, loaded.GetBytecode());
     if (bc.IsNull()) {

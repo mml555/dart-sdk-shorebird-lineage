@@ -119,6 +119,22 @@ FunctionPtr BytecodeLoader::LoadBytecode(bool load_code) {
   return Function::RawCast(bytecode_reader.ReadObject());
 }
 
+StringPtr BytecodeLoader::FindAlreadyLoadedLibrary() {
+  ASSERT(IsolateGroup::Current()->program_lock()->IsCurrentThreadWriter());
+
+  if (bytecode_component_array_.IsNull()) {
+    BytecodeReaderHelper component_reader(thread_, binary_);
+    bytecode_component_array_ = component_reader.ReadBytecodeComponent();
+  }
+
+  BytecodeComponentData bytecode_component(bytecode_component_array_);
+  BytecodeReaderHelper bytecode_reader(thread_, &bytecode_component);
+  AlternativeReadingScope alt(&bytecode_reader.reader(),
+                              bytecode_component.GetLibraryIndexOffset());
+  return bytecode_reader.FindAlreadyLoadedLibrary(
+      bytecode_component.GetNumLibraries());
+}
+
 void BytecodeLoader::LoadPendingCode() {
   ASSERT(IsolateGroup::Current()->program_lock()->IsCurrentThreadWriter());
   ASSERT(!bytecode_component_array_.IsNull());
@@ -2616,6 +2632,23 @@ void BytecodeReaderHelper::ReadLibraryDeclaration(const Library& library,
   library.SetLoaded();
 }
 
+StringPtr BytecodeReaderHelper::FindAlreadyLoadedLibrary(
+    intptr_t num_libraries) {
+  auto& library = Library::Handle(Z);
+  auto& uri = String::Handle(Z);
+  AlternativeReadingScope alt(&reader_, reader_.offset());
+  for (intptr_t i = 0; i < num_libraries; ++i) {
+    uri ^= ReadObject();
+    reader_.ReadUInt();  // Skip library offset.
+
+    library = Library::LookupLibrary(thread_, uri);
+    if (!library.IsNull()) {
+      return uri.ptr();
+    }
+  }
+  return String::null();
+}
+
 void BytecodeReaderHelper::ReadLibraryDeclarations(
     intptr_t num_libraries,
     const GrowableObjectArray& pending_objects,
@@ -2625,18 +2658,13 @@ void BytecodeReaderHelper::ReadLibraryDeclarations(
 
   // Verify that libraries in the dynamic module are not loaded yet.
   {
-    AlternativeReadingScope alt(&reader_, reader_.offset());
-    for (intptr_t i = 0; i < num_libraries; ++i) {
-      uri ^= ReadObject();
-      reader_.ReadUInt();  // Skip library offset.
-
-      library = Library::LookupLibrary(thread_, uri);
-      if (!library.IsNull()) {
-        const String& msg = String::Handle(String::NewFormatted(
-            "Unable to load dynamic module: library \'%s\' is already loaded",
-            uri.ToCString()));
-        Exceptions::ThrowStateError(msg);
-      }
+    const String& loaded_uri =
+        String::Handle(Z, FindAlreadyLoadedLibrary(num_libraries));
+    if (!loaded_uri.IsNull()) {
+      const String& msg = String::Handle(String::NewFormatted(
+          "Unable to load dynamic module: library \'%s\' is already loaded",
+          loaded_uri.ToCString()));
+      Exceptions::ThrowStateError(msg);
     }
   }
 
