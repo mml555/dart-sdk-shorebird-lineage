@@ -24,6 +24,8 @@
 #include "vm/longjump.h"
 #include "vm/object.h"
 #include "vm/object_store.h"
+#include "vm/os.h"
+#include "vm/report.h"
 #include "vm/resolver.h"
 #include "vm/reusable_handles.h"
 #include "vm/scopes.h"
@@ -43,6 +45,8 @@ DEFINE_FLAG(charp,
             "Dump only kernel bytecode of functions with matching names");
 
 namespace bytecode {
+
+static bool FailsByLongJump(Thread* thread);
 
 static bool ShouldPrint(const Function& function) {
   return function.NamePassesFilter(FLAG_dump_kernel_bytecode_filter);
@@ -222,7 +226,7 @@ void BytecodeReaderHelper::ReadCode(const Function& function,
   ASSERT(!function.IsImplicitGetterFunction() &&
          !function.IsImplicitSetterFunction());
   if (code_offset == 0) {
-    FATAL("Function %s (kind %s) doesn't have bytecode",
+    LoadFailed("Function %s (kind %s) doesn't have bytecode",
           function.ToFullyQualifiedCString(),
           Function::KindToCString(function.kind()));
   }
@@ -962,12 +966,12 @@ ArrayPtr BytecodeReaderHelper::ReadBytecodeComponent() {
 
   intptr_t magic = reader_.ReadUInt32();
   if (magic != KernelBytecode::kMagicValue) {
-    FATAL("Unexpected Dart bytecode magic %" Px, magic);
+    LoadFailed("Unexpected Dart bytecode magic %" Px, magic);
   }
 
   const intptr_t version = reader_.ReadUInt32();
   if (version != KernelBytecode::kBytecodeFormatVersion) {
-    FATAL("Unsupported Dart bytecode format version %" Pd
+    LoadFailed("Unsupported Dart bytecode format version %" Pd
           ". "
           "This version of Dart VM supports bytecode format version %" Pd ".",
           version, KernelBytecode::kBytecodeFormatVersion);
@@ -1212,7 +1216,7 @@ ObjectPtr BytecodeReaderHelper::ReadObjectContents(uint32_t header) {
       if (uri.ptr() == Symbols::DartConcurrent().ptr() &&
           !FLAG_experimental_shared_data) {
         // Keep in sync with KernelLoader::LoadLibraryImportsAndExports.
-        FATAL(
+        LoadFailed(
             "Encountered dart:concurrent when functionality is disabled. "
             "Pass --experimental-shared-data");
       }
@@ -1224,7 +1228,7 @@ ObjectPtr BytecodeReaderHelper::ReadObjectContents(uint32_t header) {
         if (uri.ptr() == Symbols::EvalSourceUri().ptr()) {
           return thread_->bytecode_loader()->GetExpressionEvaluationLibrary();
         }
-        FATAL("Unable to find library %s", uri.ToCString());
+        LoadFailed("Unable to find library %s", uri.ToCString());
       }
       return library;
     }
@@ -1232,10 +1236,14 @@ ObjectPtr BytecodeReaderHelper::ReadObjectContents(uint32_t header) {
       const Library& library = Library::CheckedHandle(Z, ReadObject());
       const String& class_name = String::CheckedHandle(Z, ReadObject());
       if (class_name.ptr() == Symbols::Empty().ptr()) {
-        NoSafepointScope no_safepoint_scope(thread_);
-        ClassPtr cls = library.toplevel_class();
+        ClassPtr cls;
+        {
+          NoSafepointScope no_safepoint_scope(thread_);
+          cls = library.toplevel_class();
+        }
+        // Outside the NoSafepointScope: LoadFailed allocates the message.
         if (cls == Class::null()) {
-          FATAL("Unable to find toplevel class %s", library.ToCString());
+          LoadFailed("Unable to find toplevel class %s", library.ToCString());
         }
         return cls;
       }
@@ -1249,7 +1257,7 @@ ObjectPtr BytecodeReaderHelper::ReadObjectContents(uint32_t header) {
                  library.ptr());
           return thread_->bytecode_loader()->GetExpressionEvaluationRealClass();
         }
-        FATAL("Unable to find class %s in %s", class_name.ToCString(),
+        LoadFailed("Unable to find class %s in %s", class_name.ToCString(),
               library.ToCString());
       }
       return cls;
@@ -1260,7 +1268,7 @@ ObjectPtr BytecodeReaderHelper::ReadObjectContents(uint32_t header) {
       if ((flags & kFlagIsField) != 0) {
         FieldPtr field = cls.LookupField(name);
         if (field == Field::null()) {
-          FATAL("Unable to find field %s in %s", name.ToCString(),
+          LoadFailed("Unable to find field %s in %s", name.ToCString(),
                 cls.ToCString());
         }
         return field;
@@ -1286,7 +1294,7 @@ ObjectPtr BytecodeReaderHelper::ReadObjectContents(uint32_t header) {
                                     ? cls.EnsureIsAllocateFinalized(thread_)
                                     : cls.EnsureIsFinalized(thread_);
         if (finalize_err != Error::null()) {
-          FATAL("Unable to finalize class %s%s: %s", cls.ToCString(),
+          LoadFailed("Unable to finalize class %s%s: %s", cls.ToCString(),
                 is_constructor ? "" : " for allocation",
                 Error::Handle(Z, finalize_err).ToErrorCString());
         }
@@ -1307,7 +1315,7 @@ ObjectPtr BytecodeReaderHelper::ReadObjectContents(uint32_t header) {
           if (reading_interface_target_ && !is_constructor) {
             return InterfaceTargetStandIn(cls, name);
           }
-          FATAL("Unable to find function %s in %s", name.ToCString(),
+          LoadFailed("Unable to find function %s in %s", name.ToCString(),
                 cls.ToCString());
         }
         return function;
@@ -1987,7 +1995,7 @@ void BytecodeReaderHelper::ReadFieldDeclarations(const Class& cls,
     if (is_shared && !FLAG_experimental_shared_data &&
         !Library::Handle(Z, cls.library()).is_dart_scheme()) {
       // Keep synced with error in KernelLoader::ReadVMAnnotations.
-      FATAL(
+      LoadFailed(
           "Encountered vm:shared when functionality is disabled. "
           "Pass --experimental-shared-data");
     }
@@ -2661,6 +2669,11 @@ void BytecodeReaderHelper::ReadLibraryDeclarations(
     const String& loaded_uri =
         String::Handle(Z, FindAlreadyLoadedLibrary(num_libraries));
     if (!loaded_uri.IsNull()) {
+      // A Dart throw would hit the RELEASE_ASSERT in Exceptions::Throw when a
+      // long jump base is set, so in that mode this is a load failure too.
+      if (FailsByLongJump(thread_)) {
+        LoadFailed("Library %s is already loaded", loaded_uri.ToCString());
+      }
       const String& msg = String::Handle(String::NewFormatted(
           "Unable to load dynamic module: library \'%s\' is already loaded",
           loaded_uri.ToCString()));
@@ -2708,8 +2721,7 @@ void BytecodeReaderHelper::ReadPendingCode(
       const auto& cls = Class::Cast(obj);
       error = cls.EnsureIsFinalized(thread_);
       if (!error.IsNull()) {
-        Exceptions::PropagateError(error);
-        UNREACHABLE();
+        LoadFailedWith(error);
       }
       members = cls.functions();
       for (intptr_t j = 0, m = members.Length(); j < m; ++j) {
@@ -2740,9 +2752,40 @@ void BytecodeReaderHelper::ReadPendingCode(
       UNREACHABLE();
 #endif
     } else {
-      FATAL("Unexpected object %s in pending objects list", obj.ToCString());
+      LoadFailed("Unexpected object %s in pending objects list", obj.ToCString());
     }
   }
+}
+
+// Route B (selfhost). The pre-main activation loads a patch with no Dart frame
+// on the stack, so a FATAL here, or a Dart exception with nowhere to land,
+// aborts the app before main instead of refusing the patch. When the loader
+// was set to fail by long jump and a LongJumpScope is in place, report the
+// failure as an Error through it; the activation refuses the patch and the
+// app runs its release code. Everyone else still gets FATAL.
+static bool FailsByLongJump(Thread* thread) {
+  BytecodeLoader* loader = thread->bytecode_loader();
+  return loader != nullptr && loader->fail_by_long_jump() &&
+         thread->long_jump_base() != nullptr;
+}
+
+void BytecodeReaderHelper::LoadFailed(const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  const char* message = OS::VSCreate(Z, format, args);
+  va_end(args);
+  if (FailsByLongJump(thread_)) {
+    Report::LongJump(LanguageError::Handle(
+        Z, LanguageError::New(String::Handle(Z, String::New(message)))));
+  }
+  FATAL("%s", message);
+}
+
+void BytecodeReaderHelper::LoadFailedWith(const Error& error) {
+  if (FailsByLongJump(thread_)) {
+    Report::LongJump(error);
+  }
+  Exceptions::PropagateError(error);
 }
 
 void BytecodeReaderHelper::FindModifiedLibraries(BitVector* modified_libs,
