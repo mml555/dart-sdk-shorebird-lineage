@@ -46,6 +46,8 @@ DEFINE_FLAG(charp,
 
 namespace bytecode {
 
+static bool FailsByLongJump(Thread* thread);
+
 static bool ShouldPrint(const Function& function) {
   return function.NamePassesFilter(FLAG_dump_kernel_bytecode_filter);
 }
@@ -1234,8 +1236,12 @@ ObjectPtr BytecodeReaderHelper::ReadObjectContents(uint32_t header) {
       const Library& library = Library::CheckedHandle(Z, ReadObject());
       const String& class_name = String::CheckedHandle(Z, ReadObject());
       if (class_name.ptr() == Symbols::Empty().ptr()) {
-        NoSafepointScope no_safepoint_scope(thread_);
-        ClassPtr cls = library.toplevel_class();
+        ClassPtr cls;
+        {
+          NoSafepointScope no_safepoint_scope(thread_);
+          cls = library.toplevel_class();
+        }
+        // Outside the NoSafepointScope: LoadFailed allocates the message.
         if (cls == Class::null()) {
           LoadFailed("Unable to find toplevel class %s", library.ToCString());
         }
@@ -2663,6 +2669,11 @@ void BytecodeReaderHelper::ReadLibraryDeclarations(
     const String& loaded_uri =
         String::Handle(Z, FindAlreadyLoadedLibrary(num_libraries));
     if (!loaded_uri.IsNull()) {
+      // A Dart throw would hit the RELEASE_ASSERT in Exceptions::Throw when a
+      // long jump base is set, so in that mode this is a load failure too.
+      if (FailsByLongJump(thread_)) {
+        LoadFailed("Library %s is already loaded", loaded_uri.ToCString());
+      }
       const String& msg = String::Handle(String::NewFormatted(
           "Unable to load dynamic module: library \'%s\' is already loaded",
           loaded_uri.ToCString()));

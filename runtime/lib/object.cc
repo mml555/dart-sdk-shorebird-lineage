@@ -1134,6 +1134,12 @@ static int32_t RouteBActivatePatchImpl(const uint8_t* payload,
     // payload's own libraries may be left partly declared, but they are new
     // libraries the release never references, and the embedder rolls back the
     // container's earlier targets, so main runs the release's code.
+    // A class that does not finalize jumps from Class::EnsureIsFinalized itself,
+    // which reports by long jump whenever a base is set; it lands here too.
+    // What a refusal leaves behind (registered payload libraries, payload
+    // classes in release classes' subclass lists) only matters to a later load
+    // in this process. The embedder activates no further target of the
+    // container after a refusal, and the next launch is a new process.
     loader.set_fail_by_long_jump(true);
     auto& already_loaded = String::Handle(zone);
     {
