@@ -15,6 +15,7 @@
 #include "vm/dart_entry.h"
 #include "vm/exceptions.h"
 #include "vm/heap/heap.h"
+#include "vm/longjump.h"
 #include "vm/native_entry.h"
 #include "vm/object.h"
 #include "vm/object_store.h"
@@ -1119,19 +1120,43 @@ static int32_t RouteBActivatePatchImpl(const uint8_t* payload,
     // StateError, and this function runs with no Dart frame on the stack (the
     // embedder's pre-main hook): there is no handler for the throw to land in,
     // so it crashes the process in Exceptions::JumpToFrame. A LongJumpScope does
-    // not help, because ThrowExceptionHelper insists no long jump base is set
-    // (RELEASE_ASSERT) and looks for Dart frames instead. So ask the loader
-    // first, without throwing, and refuse. Under the program lock held here the
-    // answer cannot change before LoadBytecode runs.
-    const String& already_loaded =
-        String::Handle(zone, loader.FindAlreadyLoadedLibrary());
+    // not catch a Dart throw, because ThrowExceptionHelper insists no long jump
+    // base is set (RELEASE_ASSERT) and looks for Dart frames instead. So ask the
+    // loader first, without throwing, and refuse. Under the program lock held
+    // here the answer cannot change before LoadBytecode runs.
+    //
+    // EVERY OTHER WAY THE LOAD CAN FAIL used to FATAL: a bytecode format this VM
+    // does not read, a reference to a library, class, field or function the
+    // release does not have, a class that does not finalize. Each aborted the
+    // app before main. The loader now reports those by Report::LongJump with an
+    // Error when told to (set_fail_by_long_jump), and a long jump, unlike a Dart
+    // throw, lands in the LongJumpScope below. Then nothing is attached: the
+    // payload's own libraries may be left partly declared, but they are new
+    // libraries the release never references, and the embedder rolls back the
+    // container's earlier targets, so main runs the release's code.
+    loader.set_fail_by_long_jump(true);
+    auto& already_loaded = String::Handle(zone);
+    {
+      LongJumpScope jump(thread);
+      if (DART_SETJMP(*jump.Set()) == 0) {
+        already_loaded = loader.FindAlreadyLoadedLibrary();
+        if (already_loaded.IsNull()) {
+          loaded = loader.LoadBytecode();
+        }
+      } else {
+        // The long jump left the error as the thread's sticky error. Take it,
+        // or main would start with it set and the isolate would die.
+        const auto& error = Error::Handle(zone, thread->StealStickyError());
+        OS::PrintErr("ROUTEB: payload does not load, refused: %s\n",
+                     error.IsNull() ? "(no error)" : error.ToErrorCString());
+        return Dart_RouteB_InvalidBytecode;
+      }
+    }
     if (!already_loaded.IsNull()) {
       OS::PrintErr("ROUTEB: payload library %s is already loaded\n",
                    already_loaded.ToCString());
       return Dart_RouteB_InvalidBytecode;
     }
-
-    loaded = loader.LoadBytecode();
     if (loaded.IsNull()) {
       OS::PrintErr("ROUTEB: LoadBytecode returned null\n");
       return Dart_RouteB_InvalidBytecode;

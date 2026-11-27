@@ -34,6 +34,17 @@ class BytecodeLoader {
   StringPtr FindAlreadyLoadedLibrary();
   void LoadPendingCode();
 
+  // Route B (selfhost): when set, a binary this loader cannot load -- an
+  // unsupported format, a reference that does not resolve, a class that does
+  // not finalize -- is reported by Report::LongJump with an Error instead of
+  // FATAL. A caller with no Dart frame on the stack (the embedder's pre-main
+  // hook) sets this inside a LongJumpScope and refuses the patch, rather than
+  // the process aborting. Off by default: every other caller keeps FATAL.
+  // A long jump can leave the binary's own libraries partly declared; they are
+  // new libraries nothing else references.
+  void set_fail_by_long_jump(bool value) { fail_by_long_jump_ = value; }
+  bool fail_by_long_jump() const { return fail_by_long_jump_; }
+
   TypedDataBasePtr binary() const { return binary_.ptr(); }
   ArrayPtr bytecode_component_array() const {
     return bytecode_component_array_.ptr();
@@ -90,6 +101,7 @@ class BytecodeLoader {
   Library* expression_evaluation_library_ = nullptr;
   Class* expression_evaluation_real_classs_ = nullptr;
   Function* expression_evaluation_function_ = nullptr;
+  bool fail_by_long_jump_ = false;
 
   DISALLOW_COPY_AND_ASSIGN(BytecodeLoader);
 };
@@ -259,6 +271,12 @@ class BytecodeReaderHelper : public ValueObject {
                                const GrowableObjectArray& pending_objects,
                                bool load_code);
   void ReadPendingCode(const GrowableObjectArray& pending_objects);
+  // Route B (selfhost): what the reader does when the binary cannot be loaded.
+  // FATAL, unless the loader was set to fail by long jump and a LongJumpScope
+  // is in place (see BytecodeLoader::set_fail_by_long_jump).
+  DART_NORETURN void LoadFailed(const char* format, ...) PRINTF_ATTRIBUTE(2, 3);
+  // The same for an Error the VM handed back: PropagateError otherwise.
+  DART_NORETURN void LoadFailedWith(const Error& error);
   // Non-throwing form of the "library is already loaded" check that
   // ReadLibraryDeclarations enforces. Returns the first such URI or null.
   StringPtr FindAlreadyLoadedLibrary(intptr_t num_libraries);
